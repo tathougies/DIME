@@ -1,0 +1,33 @@
+name: dime
+version: 0.0.1
+cabal-version: >=1.2
+build-type: Simple
+license: AllRightsReserved
+license-file: ""
+synopsis: Dime: A Distributed In-memory environment
+description:
+data-dir: ""
+
+executable dime-data-client
+    build-depends: QuickCheck -any, base -any, vector -any, data-default -any,
+                   zeromq3-haskell -any, haskeline -any, binary -any, bytestring -any,
+                   hslogger -any, array -any, split -any, containers -any
+    main-is: SimpleDataClient.hs
+    buildable: True
+    hs-source-dirs: src
+
+executable dime-data-server
+    build-depends: QuickCheck -any, base -any, vector -any, data-default -any,
+                   zeromq3-haskell -any, haskeline -any, binary -any, bytestring -any,
+                   hslogger -any, array -any, split -any, containers -any
+    main-is: DataServer.hs
+    buildable: True
+    hs-source-dirs: src
+
+test-suite test-dime
+    build-depends: QuickCheck -any, base -any
+    type: exitcode-stdio-1.0
+    main-is: Main.hs
+    buildable: True
+    cpp-options: -DMAIN_FUNCTION=testMain
+    hs-source-dirs: src

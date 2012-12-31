@@ -1,0 +1,33 @@
+\documentclass{article}
+
+\newcommand{\filepath}[1]{\texttt{#1}}
+\newcommand{\command}[1]{\texttt{#1}}
+
+\begin{document}
+\title{DIME: A distributed in-memory database}
+\author{Travis Athougies}
+\date{December 31, 2012}
+\maketitle
+
+\section{The Block Servers}
+
+The block servers are the worker bees of the DIME hive. They store the blocks that make up the
+columns the table server keeps track of. In general, the table server manages all communication with
+the block servers. The table server also checks if any block servers have gone down, and will
+automatically reroute requests based on this information.
+
+The main server loop for the block servers can be found in
+\filepath{Database/DIME/DataServer.hs}. The servers respond to the commands foundin
+\filepath{Database/DIME/DataServer/Command.hs}. These commands are sent to the servers by the table
+server.
+
+The block servers blindly store blocks. They know nothing about how the blocks fit into the
+overarching picture. Each block has an ID number, which is unique within the column. Since each
+column is identified by a unique column ID within a table, each block can be uniquely identified by
+a triple $(T, C, B),$ where $T$ is the table ID, $C$ is the column ID, and $B$ is a block ID.
+
+The commands for manipulating blocks at this low-level are discussed below.
+
+\subsection{\command{NewBlock}}
+
+\end{document}
