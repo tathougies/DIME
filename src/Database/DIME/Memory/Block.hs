@@ -23,6 +23,8 @@ import Control.Monad
 
 import Test.QuickCheck.All
 
+import Text.JSON
+
 blockLength = 65536 -- blocks store 65k entries
 
 -- Block classes
@@ -151,6 +153,17 @@ instance Binary ColumnValue where
 -- | Data class for column types
 data ColumnType = IntColumn | StringColumn | DoubleColumn
                 deriving (Show, Read, Eq, Enum, Ord)
+
+instance JSON ColumnType where
+    showJSON IntColumn = showJSON $ toJSString "int"
+    showJSON StringColumn = showJSON $ toJSString "string"
+    showJSON DoubleColumn = showJSON $ toJSString "double"
+
+    readJSON (JSString x)
+        | fromJSString x == "int" = Ok IntColumn
+        | fromJSString x == "string" = Ok StringColumn
+        | fromJSString x == "double" = Ok DoubleColumn
+    readJSON value = Error $ "Invalid ColumnType: " ++ Text.JSON.encode value
 
 instance Binary ColumnType where
     put t = put $ fromEnum t

@@ -11,18 +11,35 @@ data-dir: ""
 executable dime-data-client
     build-depends: QuickCheck -any, base -any, vector -any, data-default -any,
                    zeromq3-haskell -any, haskeline -any, binary -any, bytestring -any,
-                   hslogger -any, array -any, split -any, containers -any
+                   hslogger -any, array -any, split -any, containers -any, json -any,
+                   network -any
     main-is: SimpleDataClient.hs
     buildable: True
     hs-source-dirs: src
+    ghc-options: -fglasgow-exts -O2
 
 executable dime-data-server
     build-depends: QuickCheck -any, base -any, vector -any, data-default -any,
                    zeromq3-haskell -any, haskeline -any, binary -any, bytestring -any,
-                   hslogger -any, array -any, split -any, containers -any
+                   hslogger -any, array -any, split -any, containers -any, json -any,
+                   network -any
     main-is: DataServer.hs
     buildable: True
     hs-source-dirs: src
+    ghc-options: -fglasgow-exts -O2
+
+
+executable dime-web-server
+    build-depends: QuickCheck -any, base -any, vector -any, data-default -any,
+                   zeromq3-haskell -any, haskeline -any, binary -any, bytestring -any,
+                   hslogger -any, array -any, split -any, containers -any, json -any,
+                   text -any, http-types -any, wai -any, stm -any, warp -any,
+                   transformers -any, directory -any, conduit -any, wai-extra -any,
+                   old-locale -any, PSQueue -any, resourcet -any, network -any, old-time -any
+    main-is: WebServer.hs
+    buildable: True
+    hs-source-dirs: src
+    ghc-options: -fglasgow-exts -O2
 
 test-suite test-dime
     build-depends: QuickCheck -any, base -any

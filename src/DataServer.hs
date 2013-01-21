@@ -10,12 +10,17 @@ import System.IO
 
 import Control.Monad
 
+import Network.BSD
+
 data Options = Options {
-      optDebug :: Bool
+      optDebug :: Bool,
+      optLocalAddress :: String
     }
 
-startOptions :: Options
-startOptions = Options {optDebug = False}
+startOptions :: IO Options
+startOptions = do
+  hostName <- getHostName
+  return Options {optDebug = False, optLocalAddress = hostName}
 
 options :: [OptDescr (Options -> IO Options)]
 options = [ Option "d" ["debug"]
@@ -28,7 +33,17 @@ options = [ Option "d" ["debug"]
                 prg <- getProgName
                 hPutStrLn stderr (usageInfo prg options)
                 exitWith ExitSuccess))
-            "Show this help"
+            "Show this help",
+            Option "l" ["local-address"]
+            (OptArg
+             (\arg opt -> case arg of
+                            Nothing -> do
+                              hostName <- getHostName
+                              return opt { optLocalAddress = hostName }
+                            Just localAddress ->
+                                return opt { optLocalAddress = localAddress })
+             "<local-address>")
+            "Set the local address"
           ]
 
 main = do
@@ -37,10 +52,13 @@ main = do
   let (actions, nonOptions, errors) = getOpt RequireOrder options args
 
   -- Run the actions on the options
-  opts <- foldl (>>=) (return startOptions) actions
+  opts <- foldl (>>=) startOptions actions
 
-  let Options { optDebug = debug } = opts
+  coordinatorName <- case nonOptions of
+                       [] -> fail "A coordinator name must be passed into the program"
+                       x -> return $ "tcp://" ++ head x ++ ":8009"
 
+  let Options { optDebug = debug, optLocalAddress = localAddress } = opts
   when debug $ setDebugMode
 
-  dataServerMain
+  dataServerMain coordinatorName localAddress

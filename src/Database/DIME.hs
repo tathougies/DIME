@@ -10,14 +10,16 @@ import Data.Int
 import Data.Binary
 import Control.Monad
 
+import Text.JSON
+
 newtype BlockID = BlockID Int64
-    deriving (Ord, Eq, Show, Read, Real, Enum, Num, Integral)
+    deriving (Ord, Eq, Show, Read, Real, Enum, Num, Integral, JSON)
 newtype TableID = TableID Int64
-    deriving (Ord, Eq, Show, Read, Real, Enum, Num, Integral)
+    deriving (Ord, Eq, Show, Read, Real, Enum, Num, Integral, JSON)
 newtype ColumnID = ColumnID Int64
-    deriving (Ord, Eq, Show, Read, Real, Enum, Num, Integral)
+    deriving (Ord, Eq, Show, Read, Real, Enum, Num, Integral, JSON)
 newtype RowID = RowID Int64
-    deriving (Ord, Eq, Show, Read, Real, Enum, Num, Integral)
+    deriving (Ord, Eq, Show, Read, Real, Enum, Num, Integral, JSON)
 
 instance Binary BlockID where
     put (BlockID blockId) = put blockId

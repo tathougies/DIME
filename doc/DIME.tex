@@ -30,4 +30,17 @@ The commands for manipulating blocks at this low-level are discussed below.
 
 \subsection{\command{NewBlock}}
 
+\section{Web Server}
+
+\texttt{/_prefs} gives access to preferences.
+
+No time series names can start with an \_.
+
+\texttt{/<timeSeriesName>} is the root of all information about the time series given.
+
+\texttt{/<timeSeriesName>/data?from=<date>\&to=<date>} returns JSON array of all data in the time
+series between these two dates.
+
+\texttt{/<timeSeriesName>/data?from=<date>\&to=<date>\&downsample=<span>}
+
 \end{document}

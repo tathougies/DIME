@@ -7,6 +7,8 @@ module Database.DIME.DataServer.State
       deleteBlock, getBlockInfo, withGenericBlock,
       modifyGenericBlock,
 
+      getBlockCount,
+
       fetchColumnForRow, updateRows, establishRowMapping
     )
     where
@@ -44,6 +46,9 @@ data DataServerState = DataServerState {
 
 empty :: DataServerState
 empty = DataServerState M.empty M.empty M.empty
+
+getBlockCount :: DataServerState -> Int
+getBlockCount st = M.size $ getBlocks st
 
 emptyBlockFromType :: B.ColumnType -> GenericBlock
 emptyBlockFromType columnType = case columnType of

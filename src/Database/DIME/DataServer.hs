@@ -18,34 +18,62 @@ import System.IO
 
 import qualified  Control.Exception as E
 import Control.Monad
+import Control.Concurrent
+import Control.Concurrent.SampleVar
 
 import GHC.Conc (numCapabilities)
 
 import qualified System.ZMQ3 as ZMQ
 import qualified Data.ByteString as SB
-import qualified Data.ByteString.Lazy as LSB
+import qualified Data.ByteString.Lazy as LBS
 import Data.Binary
 import Data.String
 import Data.List
 import Data.Function
 import Data.Typeable
 
+import qualified Database.DIME.Server.Peers as Peers
+
 -- For module use only
 moduleName = "Database.DIME.DataServer"
 
-dataServerMain :: IO ()
-dataServerMain = do
+keepAliveTime = 10000000
+
+dataServerMain :: String -> String -> IO ()
+dataServerMain coordinatorName localAddress = do
   infoM moduleName "DIME Data server starting..."
-  ZMQ.withContext (fromIntegral numCapabilities) $ \c ->
+  ZMQ.withContext $ \c -> do
+      infoVar <- newSampleVar ServerState.empty
+      forkIO $ statusClient infoVar coordinatorName localAddress c
       ZMQ.withSocket c ZMQ.Rep $ \s -> do
           ZMQ.bind s "tcp://127.0.0.1:8008"
-          runStatefulIOLoop ServerState.empty $ loop s -- Run the loop with this state. TODO: might need to become some sort of atomic MVar
+          runStatefulIOLoop ServerState.empty $ loop s infoVar -- Run the loop with this state.
   return ()
   where
-    loop s state = do
+    statusClient infoVar coordinatorName hostName ctxt =
+        ZMQ.withSocket ctxt ZMQ.Req $ \s ->
+            do
+              ZMQ.connect s coordinatorName
+              let zmqName = Peers.PeerName $ "tcp://" ++ hostName ++ ":8008"
+              forever $ do
+                   putStrLn "Fetch state"
+                   state <- readSampleVar infoVar
+                   putStrLn $ show $ ServerState.getBlocks state
+                   let cmdData = Peers.mkUpdateCommand zmqName $ ServerState.getBlockCount state
+                   E.evaluate cmdData
+                   putStrLn "Fetch state 2"
+                   ZMQ.send s [] cmdData
+                   reply <- ZMQ.receive s
+                   let response = Peers.parsePeerResponse reply
+                   case response of
+                     Peers.InfoRequest -> return ()
+                     _ -> return ()
+                   threadDelay keepAliveTime
+
+    loop s infoVar state = do
       line <- ZMQ.receive s
       let cmd :: Command
-          cmd = decode $ LSB.fromChunks [line]
+          cmd = decode $ LBS.fromChunks [line]
       (response, newState) <- case cmd of -- Parse the command
                                 FetchRows tableId rowIds columnIds ->
                                     doFetchRows tableId rowIds columnIds state
@@ -58,7 +86,8 @@ dataServerMain = do
                                     doDeleteBlock tableId columnId blockId state
                                 BlockInfo tableId columnId blockId ->
                                     doBlockInfo tableId columnId blockId state
-      ZMQ.send s [] $ head $ LSB.toChunks $ encode response
+      ZMQ.send s [] $ head $ LBS.toChunks $ encode response
+      writeSampleVar infoVar state
       case newState of
         Just state' -> return state'
         Nothing -> return state
@@ -119,7 +148,7 @@ dataServerMain = do
     doBlockInfo tableId columnId blockId state =
         if ServerState.hasBlock tableId columnId blockId state then
             let blockInfo = ServerState.getBlockInfo tableId columnId blockId state
-            in return (BlockInfoResponse blockInfo, Just state)
+            in putStrLn "Do block info" >> return (BlockInfoResponse blockInfo, Just state)
          else
             return (BlockDoesNotExist, Nothing)
 
@@ -137,7 +166,7 @@ dataServerSimpleClient :: IO ()
 dataServerSimpleClient = do
   hd <- initializeInput defaultSettings -- Initialize haskeline
   infoM moduleName "Welcome to DIME data server debug client..."
-  ZMQ.withContext (fromIntegral numCapabilities) $ \c ->
+  ZMQ.withContext $ \c ->
       ZMQ.withSocket c ZMQ.Req $ \s -> do
           ZMQ.connect s "tcp://127.0.0.1:8008"
           forever $ loop s hd
@@ -151,8 +180,8 @@ dataServerSimpleClient = do
                 Nothing -> putStrLn $ "Could not parse request"
                 Just (cmd :: Command) -> do
                              putStrLn $ "Sending command"
-                             let cmdData = head $ LSB.toChunks $ encode cmd
+                             let cmdData = head $ LBS.toChunks $ encode cmd
                              ZMQ.send s [] cmdData
                              reply <- ZMQ.receive s
-                             let response = (decode $ LSB.fromChunks [reply] :: Response)
+                             let response = (decode $ LBS.fromChunks [reply] :: Response)
                              putStrLn $ show response
