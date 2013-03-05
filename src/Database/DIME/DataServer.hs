@@ -1,29 +1,16 @@
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ScopedTypeVariables, BangPatterns #-}
 module Database.DIME.DataServer
     (
      dataServerMain, dataServerSimpleClient
     ) where
-import Database.DIME
-import qualified Database.DIME.DataServer.State as ServerState
-import Database.DIME.DataServer.Command
-import Database.DIME.DataServer.Response
-import Database.DIME.Util
-import Database.DIME.Memory.Block
-import qualified Database.DIME.Memory.BlockInfo as BI
-
-import System.Log.Logger
-import System.Console.Haskeline
-import System.Console.Haskeline.IO
-import System.IO
-
 import qualified  Control.Exception as E
+import Control.Exception.Base
 import Control.Monad
 import Control.Concurrent
+import Control.Concurrent.STM
 import Control.Concurrent.SampleVar
+import Control.Seq
 
-import GHC.Conc (numCapabilities)
-
-import qualified System.ZMQ3 as ZMQ
 import qualified Data.ByteString as SB
 import qualified Data.ByteString.Lazy as LBS
 import Data.Binary
@@ -31,37 +18,94 @@ import Data.String
 import Data.List
 import Data.Function
 import Data.Typeable
+import Data.IORef
 
+import qualified Database.DIME.DataServer.State as ServerState
 import qualified Database.DIME.Server.Peers as Peers
+import qualified Database.DIME.Memory.BlockInfo as BI
+import Database.DIME
+import Database.DIME.DataServer.Config
+import Database.DIME.DataServer.Command
+import Database.DIME.DataServer.Response
+import Database.DIME.Util
+import Database.DIME.Memory.Block
+import Database.DIME.Flow hiding (BlockInfo)
+import Database.DIME.Server.State (PeerName(..))
+
+import GHC.Conc (numCapabilities)
+
+import Language.Flow.Compile
+import Language.Flow.Execution.Types
+import Language.Flow.Execution.GMachine
+
+import qualified System.ZMQ3 as ZMQ
+import System.Log.Logger
+import System.Console.Haskeline hiding (throwTo)
+import System.Console.Haskeline.IO
+import System.IO
+import System.Time
+import System.IO.Unsafe
+import System.Posix.Signals
 
 -- For module use only
 moduleName = "Database.DIME.DataServer"
 
+data SigTermReceived = SigTermReceived
+                     deriving (Show, Typeable)
+
+instance Exception SigTermReceived
+
 keepAliveTime = 10000000
+dumpDataPeriod = 5000000 -- one minute
+
+termSignalReceived :: IORef Bool
+termSignalReceived = unsafePerformIO $ newIORef False
+
+untilTerm :: IO () -> IO ()
+untilTerm action = do
+  action
+  status <- readIORef termSignalReceived
+  if status then
+      do
+        putStrLn "done"
+        return ()
+   else untilTerm action
+
+termHandler :: ThreadId -> IO ()
+termHandler mainThreadId = do
+  putStrLn "Term received"
+  throwTo mainThreadId SigTermReceived
+  writeIORef termSignalReceived True
 
 dataServerMain :: String -> String -> IO ()
 dataServerMain coordinatorName localAddress = do
-  infoM moduleName "DIME Data server starting..."
+  let coordinatorServerName = "tcp://" ++ coordinatorName ++ ":" ++ show coordinatorPort
+      coordinatorQueryDealerName = "tcp://" ++ coordinatorName ++ ":" ++ show queryBrokerPort
+  infoM moduleName "DIME Data server starting up..."
+  initFlowEngine
+  mainThreadId <- myThreadId
+  installHandler softwareTermination (Catch $ termHandler mainThreadId) Nothing
+  installHandler keyboardSignal (Catch $ termHandler mainThreadId) Nothing
+  stateVar <- ServerState.mkEmptyServerState "dime-data"
+  infoM moduleName "DIME data loaded..."
   ZMQ.withContext $ \c -> do
-      infoVar <- newSampleVar ServerState.empty
-      forkIO $ statusClient infoVar coordinatorName localAddress c
+      forkIO $ statusClient stateVar coordinatorServerName localAddress c
       ZMQ.withSocket c ZMQ.Rep $ \s -> do
-          ZMQ.bind s "tcp://127.0.0.1:8008"
-          runStatefulIOLoop ServerState.empty $ loop s infoVar -- Run the loop with this state.
-  return ()
+          ZMQ.bind s $ "tcp://127.0.0.1:" ++ show dataPort
+          ZMQ.connect s coordinatorQueryDealerName -- Connect to coordinators dealer socket
+          forkIO $ untilTerm $ loop s c coordinatorServerName stateVar -- Run the loop with this state.
+          untilTerm $ saveDataPeriodically stateVar
+          dumpData stateVar
+          return ()
   where
-    statusClient infoVar coordinatorName hostName ctxt =
+    statusClient stateVar coordinatorName hostName ctxt =
         ZMQ.withSocket ctxt ZMQ.Req $ \s ->
             do
               ZMQ.connect s coordinatorName
-              let zmqName = Peers.PeerName $ "tcp://" ++ hostName ++ ":8008"
-              forever $ do
-                   putStrLn "Fetch state"
-                   state <- readSampleVar infoVar
-                   putStrLn $ show $ ServerState.getBlocks state
+              let zmqName = PeerName $ "tcp://" ++ hostName ++ ":" ++ show dataPort
+              untilTerm $ do
+                   state <- readTVarIO stateVar
                    let cmdData = Peers.mkUpdateCommand zmqName $ ServerState.getBlockCount state
-                   E.evaluate cmdData
-                   putStrLn "Fetch state 2"
                    ZMQ.send s [] cmdData
                    reply <- ZMQ.receive s
                    let response = Peers.parsePeerResponse reply
@@ -70,27 +114,69 @@ dataServerMain coordinatorName localAddress = do
                      _ -> return ()
                    threadDelay keepAliveTime
 
-    loop s infoVar state = do
+    dumpData stateVar = ServerState.dumpState stateVar
+
+    saveDataPeriodically stateVar = E.catch (saveDataPeriodically' stateVar) $
+                                    (\(e :: SigTermReceived) -> return ())
+
+    saveDataPeriodically' stateVar = do
+      threadDelay dumpDataPeriod
+      dumpData stateVar
+
+    expandRowIds regions = concatMap (\(x, y) -> [x..(y - RowID 1)]) regions
+
+    loop s c coordinatorName stateVar = do
       line <- ZMQ.receive s
       let cmd :: Command
           cmd = decode $ LBS.fromChunks [line]
-      (response, newState) <- case cmd of -- Parse the command
+      infoM moduleName $ "Received " ++ show cmd
+      response <- case cmd of
+        RunQuery key txt -> doRunQuery c coordinatorName key txt -- this runs in the IO monad, non-atomically
+        _ -> do
+          (response, state') <- atomically $ do
+              state <- readTVar stateVar
+              (response, !newState) <- case cmd of -- Parse the command
                                 FetchRows tableId rowIds columnIds ->
-                                    doFetchRows tableId rowIds columnIds state
+                                    doFetchRows tableId (expandRowIds rowIds) columnIds state
                                 UpdateRows tableId rowIds columnIds values ->
                                     doUpdateRows tableId rowIds columnIds values state
                                 -- Block commands
-                                NewBlock tableId columnId blockId startRowId endRowId columnType ->
-                                    doNewBlock tableId columnId blockId startRowId endRowId columnType state
-                                DeleteBlock tableId columnId blockId ->
-                                    doDeleteBlock tableId columnId blockId state
-                                BlockInfo tableId columnId blockId ->
-                                    doBlockInfo tableId columnId blockId state
+                                NewBlock blockSpec startRowId endRowId columnType ->
+                                    doNewBlock blockSpec startRowId endRowId columnType state
+                                DeleteBlock blockSpec ->
+                                    doDeleteBlock blockSpec state
+                                BlockInfo blockSpec ->
+                                    doBlockInfo blockSpec state
+                                Map op inputs output firstRow ->
+                                    doMap op inputs output firstRow state
+              case newState of
+                Just state' -> do
+                  writeTVar stateVar state'
+                  return (response, state')
+                Nothing -> return (response, state)
+          E.evaluate (state' `using` rseq)
+          return response
       ZMQ.send s [] $ head $ LBS.toChunks $ encode response
-      writeSampleVar infoVar state
-      case newState of
-        Just state' -> return state'
-        Nothing -> return state
+      return ()
+
+    defaultProgramCellCount = 4096
+
+    doRunQuery c coordinatorName key txt =
+      E.catch (do
+              let queryState = QueryState { queryKey = key,
+                                            queryServerName = coordinatorName,
+                                            queryZMQContext = c}
+              (state, ret) <- runProgramFromText defaultProgramCellCount queryState txt
+              let readEntireGraph = do
+                    tosAddr <- topOfStack
+                    allPoints <- findReachablePoints [tosAddr]
+                    mapM (\addr -> do
+                            val <- readGraph addr
+                            return (addr, val)) allPoints
+              Right (_, graph) <- runGMachine readEntireGraph state
+              return $ QueryResponse graph)
+            (\(e :: SomeException) -> do
+                 return $ Fail $ show e)
 
     doFetchRows tableId rowIds columnIds state =
         let values = map fetchRow rowIds
@@ -126,37 +212,41 @@ dataServerMain coordinatorName localAddress = do
         in case valuesAreSane of
             False -> return (InconsistentTypes, Nothing)
             True -> do
-                   putStrLn $ show idsAndValues
-                   result <- E.try (E.evaluate state') :: IO (Either SomeException ServerState.DataServerState)
-                   return $ case result of
-                              Left e -> (Fail $ show e, Nothing)
-                              Right state -> (Ok, Just state)
+              catchSTM (state' `seq` return (Ok, Just state')) (\(E.SomeException e) -> return (Fail $ show e, Nothing))
 
-    doNewBlock tableId columnId blockId startRowId endRowId columnType state =
+    doNewBlock blockSpec@(BlockSpec tableId columnId blockId) startRowId endRowId columnType state =
         let newBlock = ServerState.emptyBlockFromType columnType
             resizedBlock = ServerState.modifyGenericBlock (const startRowId)
                            (resize $ 1 + endRowId .- startRowId) newBlock
             newState = ServerState.establishRowMapping (tableId, columnId) (startRowId, endRowId) blockId $
-                       ServerState.insertBlock tableId columnId blockId resizedBlock state
+                       ServerState.insertBlock blockSpec resizedBlock state
             a .- b = (fromIntegral a) - (fromIntegral b)
         in
-          if ServerState.hasBlock tableId columnId blockId state then
+          if ServerState.hasBlock blockSpec state then
               return (BlockAlreadyExists, Nothing)
           else
             return (Ok, Just newState)
 
-    doBlockInfo tableId columnId blockId state =
-        if ServerState.hasBlock tableId columnId blockId state then
-            let blockInfo = ServerState.getBlockInfo tableId columnId blockId state
-            in putStrLn "Do block info" >> return (BlockInfoResponse blockInfo, Just state)
+    doBlockInfo blockSpec state =
+        if ServerState.hasBlock blockSpec state then
+            let blockInfo = ServerState.getBlockInfo blockSpec state
+            in return (BlockInfoResponse blockInfo, Just state)
          else
             return (BlockDoesNotExist, Nothing)
 
-    doDeleteBlock tableId columnId blockId state =
-        if ServerState.hasBlock tableId columnId blockId state then
-            return (Ok, Just $ ServerState.deleteBlock tableId columnId blockId state)
+    doDeleteBlock blockSpec state =
+        if ServerState.hasBlock blockSpec state then
+            return (Ok, Just $ ServerState.deleteBlock blockSpec state)
          else
              return (BlockDoesNotExist, Nothing)
+
+    doMap op inputs output firstRow state =
+        let allInputsExist = all (flip ServerState.hasBlock state) inputs
+        in if allInputsExist then
+               case ServerState.mapServerBlock op inputs output firstRow state of
+                 Nothing -> return (InconsistentTypes, Nothing)
+                 Just state' -> return (Ok, Just state')
+           else return (BlockDoesNotExist, Nothing)
 
 {-| Implements a simple client to the server above.
     Commands are entered directly using Haskell read syntax. Responses are parsed
@@ -181,7 +271,11 @@ dataServerSimpleClient = do
                 Just (cmd :: Command) -> do
                              putStrLn $ "Sending command"
                              let cmdData = head $ LBS.toChunks $ encode cmd
+                             startTime <- getClockTime
                              ZMQ.send s [] cmdData
                              reply <- ZMQ.receive s
+                             endTime <- getClockTime
                              let response = (decode $ LBS.fromChunks [reply] :: Response)
+                                 timeTaken = endTime `diffClockTimes` startTime
                              putStrLn $ show response
+                             putStrLn $ "Query took " ++ (show $ tdMin timeTaken) ++ " m, " ++ (show $ tdSec timeTaken) ++ "s, " ++ (show $ (tdPicosec timeTaken) `div` 1000000000) ++ "ms."

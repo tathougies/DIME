@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
-module Database.DIME.Server.TimeSeriesApp (timeSeriesApp) where
+module Database.DIME.Server.TimeSeriesApp (timeSeriesApp, listAllTimeSeries) where
 
 import System.Log.Logger
 
@@ -18,8 +18,8 @@ import Data.ByteString.Lazy.Char8 ()
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.Text as T
-import Data.String
 import qualified Data.Map as M
+import Data.String
 
 import Database.DIME.Server.HttpError
 import Database.DIME.Server.Util
@@ -29,6 +29,15 @@ import Database.DIME.Memory.Block
 import Text.JSON
 
 moduleName = "Database.DIME.Server.TimeSeriesApp"
+
+listAllTimeSeries :: State -> Application
+listAllTimeSeries state request = do
+  tsNames <- liftIO $ atomically $ do
+    tssMap <- readTVar $ timeSeriessRef state
+    let tsVars = M.elems tssMap
+    tss <- mapM readTVar tsVars
+    return $ map getName tss
+  ok [] $ fromString $ encode tsNames
 
 timeSeriesApp :: State -> TimeSeriesName -> [T.Text] -> Application
 timeSeriesApp state timeSeriesName path request =

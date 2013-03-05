@@ -1,14 +1,17 @@
-{-# LANGUAGE BangPatterns, TypeFamilies, FlexibleInstances, ExistentialQuantification, RankNTypes #-}
+{-# LANGUAGE BangPatterns, TypeFamilies, FlexibleInstances, ExistentialQuantification, RankNTypes, FlexibleContexts #-}
 module Database.DIME.Memory.Block
     (
      ColumnValue(..),
      ColumnType(..),
      BlockStorable(..),
+     Block (..),
      typeRepToColumnType,
      withColumnValue
     ) where
 
-import Data.List
+import Prelude hiding (length)
+
+import Data.List hiding (length)
 import Data.List.Split
 import Data.Default
 import Data.Binary
@@ -20,6 +23,7 @@ import qualified Data.Vector.Unboxed as V
 import qualified Data.Array.IArray as A
 
 import Control.Monad
+import Control.DeepSeq
 
 import Test.QuickCheck.All
 
@@ -33,7 +37,7 @@ blockLength = 65536 -- blocks store 65k entries
     The s type is the storage type
     The d type is the data type stored in the storage
 -}
-class (Show s, Read s, Binary s, Typeable s) => BlockStorable s where
+class (Show s, Read s, Binary s, Typeable s, NFData (Block s)) => BlockStorable s where
     data Block s
 
     -- | Get data at an index
@@ -58,11 +62,14 @@ class (Show s, Read s, Binary s, Typeable s) => BlockStorable s where
     -- | default value
     defaultBlockElement :: s
 
+    -- | convert block to list of values
+    toList :: Block s -> [s]
+    toList blk = map (blk #!) [0..length blk - 1]
+
     -- | resize block. Default implementation uses slice, append, and defaultBlockElement
     resize :: Int -> Block s -> Block s
     resize newSize block
-        | (Database.DIME.Memory.Block.length block) < newSize = let ret = (foldr (.) id $ replicate (newSize - (Database.DIME.Memory.Block.length block)) $
-                                                                                 append defaultBlockElement) block -- Extend
+        | (Database.DIME.Memory.Block.length block) < newSize = let ret = foldr append block $ replicate (newSize - (Database.DIME.Memory.Block.length block)) defaultBlockElement
                                                                 in
                                                                   ret `seq` ret
         | (Database.DIME.Memory.Block.length block) > newSize = slice 0 newSize block -- Slice
@@ -86,6 +93,17 @@ instance BlockStorable [Char] where
     slice b e (StringStorage v) = StringStorage $ A.listArray (0, e - b - 1) $ map (v A.!) [b..e-1]
     defaultBlockElement = ""
 
+    toList (StringStorage a) = A.elems a
+
+    resize newSize block
+        | (Database.DIME.Memory.Block.length block) < newSize = case block of
+                                                                  StringStorage a -> StringStorage $ A.listArray (0, newSize - 1) $ (A.elems a) ++ repeat defaultBlockElement
+        | (Database.DIME.Memory.Block.length block) > newSize = slice 0 newSize block -- Slice
+        | otherwise = block
+
+instance NFData (Block [Char]) where
+    rnf (StringStorage a) = rnf a
+
 instance BlockStorable Int where
     newtype Block Int = IntStorage (V.Vector Int)
 
@@ -99,6 +117,17 @@ instance BlockStorable Int where
     slice b e (IntStorage v) = IntStorage $ V.slice b e v
     defaultBlockElement = 0
 
+    toList (IntStorage v) = V.toList v
+
+    resize newSize block
+        | (Database.DIME.Memory.Block.length block) < newSize = case block of
+                                                                  IntStorage v -> IntStorage $ V.fromList $ (V.toList v) ++ replicate (newSize - V.length v) defaultBlockElement
+        | (Database.DIME.Memory.Block.length block) > newSize = slice 0 newSize block -- Slice
+        | otherwise = block
+
+instance NFData (Block Int) where
+    rnf (IntStorage a) = rnf a
+
 instance BlockStorable Double where
     newtype Block Double = DoubleStorage (V.Vector Double)
 
@@ -111,6 +140,17 @@ instance BlockStorable Double where
     append e (DoubleStorage v) = DoubleStorage $ V.snoc v e
     slice b e (DoubleStorage v) = DoubleStorage $ V.slice b e v
     defaultBlockElement = 0.0
+
+    toList (DoubleStorage v) = V.toList v
+
+    resize newSize block
+        | (Database.DIME.Memory.Block.length block) < newSize = case block of
+                                                                  DoubleStorage v -> DoubleStorage $ V.fromList $ (V.toList v) ++ replicate (newSize - V.length v) defaultBlockElement
+        | (Database.DIME.Memory.Block.length block) > newSize = slice 0 newSize block -- Slice
+        | otherwise = block
+
+instance NFData (Block Double) where
+    rnf (DoubleStorage a) = rnf a
 
 instance (BlockStorable a, Show a) => Show (Block a) where
     show x = "Block [" ++ (intercalate "," $ map (show.(x #!)) [0..(Database.DIME.Memory.Block.length x) - 1]) ++ "]"
@@ -158,6 +198,7 @@ instance JSON ColumnType where
     showJSON IntColumn = showJSON $ toJSString "int"
     showJSON StringColumn = showJSON $ toJSString "string"
     showJSON DoubleColumn = showJSON $ toJSString "double"
+    showJSON x = error $ "Can't serialize " ++ show x ++ " column type to JSON"
 
     readJSON (JSString x)
         | fromJSString x == "int" = Ok IntColumn

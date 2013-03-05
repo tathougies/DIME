@@ -1,21 +1,27 @@
-{-# LANGUAGE TemplateHaskell, BangPatterns, DatatypeContexts #-}
+{-# LANGUAGE TemplateHaskell, BangPatterns #-}
 module Data.Tree.DisjointIntervalTree
     (DisjointIntervalTree,
      empty, lookup, keys, assocs, elems,
      insert, delete,
+     fromList,
      runAllTests)
     where
 
-import Prelude hiding (filter, map, lookup)
+import Prelude hiding (filter, map, lookup, foldr)
 import qualified Prelude as P
 import Data.Maybe
+
+import Control.DeepSeq
 
 import Test.QuickCheck
 import Test.QuickCheck.All
 
-data (Ord k, Eq v) => DisjointIntervalTree k v = Tree !k !Int (Maybe v) !(DisjointIntervalTree k v) !(DisjointIntervalTree k v) |
-                                              Tip
-                                              deriving (Show, Read, Eq)
+data DisjointIntervalTree k v = Tree !k !Int (Maybe v) !(DisjointIntervalTree k v) !(DisjointIntervalTree k v) |
+                                Tip
+                                deriving (Show, Read, Eq)
+
+instance (Ord k, Eq v, NFData k, NFData v) => NFData (DisjointIntervalTree k v) where
+    rnf = rnf.(foldr (\k x xs -> (k,x):xs) [])
 
 empty :: DisjointIntervalTree k v
 empty = Tip
@@ -67,16 +73,25 @@ assocs (Tree ourKey _ v leftChild rightChild) = (assocs leftChild) ++
                                                    Just x -> [((ourKey, key rightChild), x)]) ++
                                                 (assocs rightChild)
 
+foldr :: (Ord k, Eq v) => (k -> Maybe v -> b -> b) -> b -> DisjointIntervalTree k v -> b
+foldr _ z Tip = z
+foldr f z (Tree k _ v l r) = let rightTree = foldr f z r
+                                 ourTree = f k v rightTree
+                             in foldr f ourTree l
+
 lookup :: (Ord k, Eq v) => k -> DisjointIntervalTree k v -> Maybe v
 lookup key tree = case lookupNode key tree of
-                    Nothing -> Nothing
-                    Just x -> value x
+                      Nothing -> Nothing
+                      Just x -> value x
 
 delete :: (Ord k, Eq v) => (k, k) -> DisjointIntervalTree k v -> DisjointIntervalTree k v
 delete !bounds tree = insertInBounds bounds Nothing tree
 
-insert :: (Ord k, Eq v)=> (k, k) -> v -> DisjointIntervalTree k v -> DisjointIntervalTree k v
+insert :: (Ord k, Eq v) => (k, k) -> v -> DisjointIntervalTree k v -> DisjointIntervalTree k v
 insert !bounds v tree = insertInBounds bounds (Just v) tree
+
+fromList :: (Ord k, Eq v) => [((k, k), v)] -> DisjointIntervalTree k v
+fromList assocs = P.foldr (uncurry insert) empty assocs
 
 bounds :: (Ord k, Eq v) => DisjointIntervalTree k v -> (k, k)
 bounds tree = (key $ minNode tree, key $ maxNode tree)
@@ -100,14 +115,14 @@ insertInBounds (lowerBound, upperBound) v tree
     | lowerBound == upperBound = tree
     | otherwise =
         let clearedTree = cleanInterval (lowerBound, upperBound) tree
-            valueForUpperBound = lookup upperBound tree
+            !valueForUpperBound = lookup upperBound tree
 
             newUpperBoundTree = insertValue upperBound valueForUpperBound clearedTree
             newLowerBoundTree = insertValue lowerBound v rightTree
 
             -- Consolidate keys
-            rightTree = if (lookup upperBound tree == v) then clearedTree else newUpperBoundTree -- only update the upper bound if we need to
-            leftTree = if (lookup lowerBound clearedTree == v) then rightTree else newLowerBoundTree
+            !rightTree = if (valueForUpperBound == v) then clearedTree else newUpperBoundTree -- only update the upper bound if we need to
+            !leftTree = if (lookup lowerBound clearedTree == v) then rightTree else newLowerBoundTree
         in leftTree
 
 insertValue :: (Ord k, Eq v) => k -> (Maybe v) -> DisjointIntervalTree k v -> DisjointIntervalTree k v
@@ -132,7 +147,7 @@ cleanInterval _ Tip = Tip
 cleanInterval (lowerBound, upperBound) tree = let toDelete = P.filter (\x -> lowerBound <= x && x < upperBound) (maxValue : (P.map fst $ keys tree))
                                                   (_, maxValue) = bounds tree
                                               in
-                                                foldr deleteStartingAt tree toDelete
+                                                P.foldr deleteStartingAt tree toDelete
 
 deleteStartingAt :: (Ord k, Eq v) => k -> DisjointIntervalTree k v -> DisjointIntervalTree k v
 deleteStartingAt _ Tip = Tip
@@ -266,4 +281,4 @@ instance (Arbitrary k, Arbitrary v, Num k, Ord k, Eq v) => Arbitrary (DisjointIn
                 uppers = zipWith (+) lowers offsets'
                 bounds = zip lowers uppers
             values <- sequence $ replicate n arbitrary
-            return $ (foldr (.) id $ zipWith ($) (P.map insert bounds) values) empty
+            return $ (P.foldr (.) id $ zipWith ($) (P.map insert bounds) values) empty

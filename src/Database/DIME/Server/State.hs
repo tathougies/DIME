@@ -1,12 +1,15 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module Database.DIME.Server.State
     ( State(..), TimeSeriesName (..), ColumnName (..),
-      TimeSeriesData(..), ColumnData(..),
+      TimeSeriesData(..), ColumnData(..), PeerName(..),
+      PeersInfo(..), PeerInfo(..), TimeSeriesIx(..),
+      BlockData(..),
       newServerState, newTimeSeries, newColumn,
       lookupTimeSeries, lookupColumn,
       deleteColumn, appendRow,
       timeSeriesAsJSON, columnAsJSON,
-      jsValueToColumnValue
+      jsValueToColumnValue,
+      rebuildTimeSeriesMap
     ) where
 
 import Control.Concurrent
@@ -16,6 +19,8 @@ import Control.Monad.IO.Class
 import Control.Monad
 
 import qualified Data.Map as Map
+import qualified Data.PSQueue as PSQ
+import Data.PSQueue (Binding ((:->)))
 import qualified Data.Text as Text
 import qualified Data.Vector as V
 import qualified Data.Tree.DisjointIntervalTree as DIT
@@ -31,8 +36,6 @@ import Data.Ord
 
 import qualified Database.DIME.Memory.Block as B
 import Database.DIME.Util
-import Database.DIME.Server.Peers hiding (empty, PeerResponse(Ok))
-import qualified Database.DIME.Server.Peers as Peers
 import Database.DIME.Server.Util
 import Database.DIME.DataServer.Response hiding (Ok)
 import Database.DIME.DataServer.Command
@@ -40,26 +43,39 @@ import Database.DIME
 
 import GHC.Conc
 
+import qualified System.ZMQ3 as ZMQ
 import System.Time
 import System.Directory
 import System.Log.Logger
 import System.Locale
-import qualified System.ZMQ3 as ZMQ
 
 import Text.JSON
 
 moduleName = "Database.DIME.Server.State"
 blockSize = 65536
 
+-- | Data type for ZeroMQ peer name
+newtype PeerName = PeerName String
+    deriving (Show, Ord, Eq, IsString, JSON, Bin.Binary)
 -- | Data type of an index into a time series
 newtype TimeSeriesIx = TimeSeriesIx Int64
-    deriving (Show, Ord, Eq, Num, Enum, JSON)
+    deriving (Show, Ord, Eq, Num, Enum, JSON, Bin.Binary, Integral, Real)
 -- | Data type of a time series name
 newtype TimeSeriesName = TimeSeriesName Text.Text
-    deriving (Show, Ord, Eq, IsString, JSON)
+    deriving (Show, Ord, Eq, IsString, JSON, Bin.Binary)
 -- | Data type of a column name
 newtype ColumnName = ColumnName Text.Text
-    deriving (Show, Ord, Eq, IsString, JSON)
+    deriving (Show, Ord, Eq, IsString, JSON, Bin.Binary)
+
+data PeerInfo = PeerInfo {
+      getPeerName :: PeerName,
+      getBlockCount :: Int -- The number of blocks that this peer is handling
+    }
+
+data PeersInfo = PeersInfo {
+        getPeers :: Map.Map PeerName (TVar PeerInfo),
+        getPeersUsage :: PSQ.PSQ PeerName Int
+      }
 
 data BlockData = BlockData {
       getOwners :: [PeerName]
@@ -70,7 +86,8 @@ data ColumnData = ColumnData {
       getColumnId :: ColumnID,
       getColumnType :: B.ColumnType,
       getBlocks :: Map.Map BlockID BlockData,
-      getBlockRanges :: DIT.DisjointIntervalTree Integer BlockID
+      getAllocatedBlocks :: DIT.DisjointIntervalTree Int64 BlockID,
+      getBlockRanges :: DIT.DisjointIntervalTree Int64 BlockID
     } deriving Show
 
 type Column = TVar ColumnData
@@ -81,7 +98,7 @@ data TimeSeriesData = TimeSeriesData {
       getLength :: TimeSeriesIx,
       getColumns :: Map.Map ColumnName Column,
       getStartTime :: ClockTime,
-      getDataFrequency :: Integer
+      getDataFrequency :: Int64
     }
 
 type TimeSeries = TVar TimeSeriesData
@@ -93,10 +110,36 @@ data State = ServerState {
       zmqContext :: ZMQ.Context
     }
 
+calcMeanBlockCount :: Floating a => PeersInfo -> IO a
+calcMeanBlockCount state = do
+    peers <- mapM readTVarIO $ Map.elems $ getPeers state
+    let peerBlockCount = map (fromIntegral.getBlockCount) peers
+    return $ (sum peerBlockCount) / (fromIntegral $ length peerBlockCount)
+
+calcBlockCountStDev :: Floating a => PeersInfo -> IO a
+calcBlockCountStDev state = do
+    peers <- mapM readTVarIO $ Map.elems $ getPeers state
+    let peerBlockCount = map (fromIntegral.getBlockCount) peers
+    meanBlockCount <- calcMeanBlockCount state
+    let variance = sum (map (\x -> (x - meanBlockCount) * (x - meanBlockCount)) peerBlockCount) /
+                   (fromIntegral $ length peerBlockCount)
+    return $ sqrt variance
+
+getLeastUtilizedPeer :: PeersInfo -> IO (Maybe PeerName)
+getLeastUtilizedPeer peersInfo = do
+  let peersUsage = getPeersUsage peersInfo
+      peers = getPeers peersInfo
+  case PSQ.findMin peersUsage of
+    Nothing -> return Nothing
+    Just (k :-> p) -> do
+      let peerVar = fromJust $ Map.lookup k peers
+      peerData <- readTVarIO peerVar
+      return $ Just $ getPeerName peerData
+
 newServerState :: FilePath -> IO State
 newServerState configLocation = do
   timeSeriessTVar <- newTVarIO Map.empty
-  peersTVar <- newTVarIO Peers.empty
+  peersTVar <- newTVarIO $ PeersInfo Map.empty PSQ.empty
   ctxt <- ZMQ.init $ fromIntegral numCapabilities
   let baseState = ServerState configLocation timeSeriessTVar peersTVar ctxt
   readStateFromConfigFile baseState
@@ -180,7 +223,7 @@ rebuildTimeSeriesMap state = do
             encode timeSeriessData
   return ()
 
-newTimeSeries :: TimeSeriesName -> Integer -> State -> IO TimeSeries
+newTimeSeries :: TimeSeriesName -> Int64 -> State -> IO TimeSeries
 newTimeSeries name frequency state@(ServerState { timeSeriessRef = timeSeriessRef }) =
     do
       localTime <- getClockTime
@@ -240,7 +283,7 @@ newColumn tsName name columnType state =
 
       return columnVar
     where
-      newColumn' name columnId columnType = newTVar $ ColumnData name columnId columnType Map.empty DIT.empty
+      newColumn' name columnId columnType = newTVar $ ColumnData name columnId columnType Map.empty DIT.empty DIT.empty
 
 deleteColumn :: TimeSeriesName -> ColumnName -> State -> IO ()
 deleteColumn timeSeriesName columnName state =
@@ -279,6 +322,7 @@ lookupColumn timeSeriesName columnName state =
 appendRow :: TimeSeriesName -> [(ColumnName, B.ColumnValue)] -> State -> IO (Maybe Int)
 appendRow timeSeriesName columnsAndValues state =
     do
+      infoM moduleName $ "Appending row " ++ show columnsAndValues
       timeSeriesR <- atomically $ lookupTimeSeries timeSeriesName state
       case timeSeriesR of
         Just timeSeries ->
@@ -306,9 +350,10 @@ appendRow timeSeriesName columnsAndValues state =
                   return Nothing
         Nothing -> return Nothing
     where
-      appendColumnInRow :: State -> TimeSeries -> Integer -> MVar Bool -> (ColumnName, B.ColumnValue) -> IO ()
+      appendColumnInRow :: State -> TimeSeries -> Int64 -> MVar Bool -> (ColumnName, B.ColumnValue) -> IO ()
       appendColumnInRow state timeSeries rowIndex signalVar (columnName, columnValue) =
           do
+            infoM moduleName $ "Appending column in row " ++ show rowIndex
             let context = zmqContext state
             -- Figure out if new blocks need to be allocated, and dispatch the appropriate request to the appropriate server
             timeSeriesData <- readTVarIO timeSeries
@@ -316,33 +361,38 @@ appendRow timeSeriesName columnsAndValues state =
 
             columnData <- readTVarIO column
             let blockRanges = getBlockRanges columnData
+                allocatedBlocks = getAllocatedBlocks columnData
                 blocks = getBlocks columnData
                 tableId = getTableId timeSeriesData
                 columnId = getColumnId columnData
 
-            (blockId, blockData) <- case DIT.lookup rowIndex blockRanges of
+            (blockId, blockData) <- case DIT.lookup rowIndex allocatedBlocks of
                            Just x -> return (x, fromJust $ Map.lookup x blocks) -- We found the block, send the add message and continue
                            Nothing -> do
                              bestPeerRes <- calculateBestPeer state columnData
                              case bestPeerRes of
                                Just bestPeerName -> do
                                                 let maxBlockId = case Map.size $ getBlocks columnData of
-                                                                   0 -> BlockID 1
+                                                                   0 -> BlockID 0
                                                                    _ -> maximum $ Map.keys $ getBlocks columnData
                                                     newBlockId = maxBlockId + (BlockID 1)
 
-                                                createBlockOnPeer context bestPeerName tableId columnId newBlockId (getColumnType columnData)
+                                                (startRowId, endRowId) <- createBlockOnPeer context bestPeerName tableId columnId
+                                                                          newBlockId (fromIntegral rowIndex) (getColumnType columnData)
 
                                                 let newBlockData = BlockData { getOwners = [bestPeerName] }
 
                                                 -- Add this block data to the column
                                                 atomically $ modifyTVar' column
                                                     (\columnData ->
-                                                         columnData { getBlocks = Map.insert newBlockId newBlockData $ getBlocks columnData })
+                                                         columnData {
+                                                           getBlocks = Map.insert newBlockId newBlockData $ getBlocks columnData,
+                                                           getAllocatedBlocks = DIT.insert (startRowId, endRowId) newBlockId $ getAllocatedBlocks columnData
+                                                         })
 
                                                 return (newBlockId, newBlockData)
                                Nothing -> fail "Could not find peer to place block on"
-
+            infoM moduleName $ "Will put in " ++ show blockId ++ " on peers " ++ show blockData
             -- Now send a message out to each owner adding the value
             results <- forM (getOwners blockData)
                   (\(PeerName peer) ->
@@ -368,22 +418,21 @@ appendRow timeSeriesName columnsAndValues state =
              else putMVar signalVar False -- failure :(
             return ()
 
-      createBlockOnPeer :: ZMQ.Context -> PeerName -> TableID -> ColumnID -> BlockID -> B.ColumnType -> IO ()
-      createBlockOnPeer ctxt (PeerName peer) tableId columnId blockId columnType =
+      createBlockOnPeer :: ZMQ.Context -> PeerName -> TableID -> ColumnID -> BlockID -> Int64 -> B.ColumnType -> IO (Int64, Int64)
+      createBlockOnPeer ctxt (PeerName peer) tableId columnId blockId rowId columnType =
         ZMQ.withSocket ctxt ZMQ.Req
            (\s -> do
               ZMQ.connect s peer
-              let BlockID intBlockId = blockId
-                  beginRowId = RowID $ intBlockId * blockSize
+              let beginRowId = RowID $ rowId - rowId `mod` blockSize
                   endRowId = beginRowId + (RowID blockSize)
-                  newBlockCommand = NewBlock tableId columnId blockId beginRowId endRowId columnType
+                  newBlockCommand = NewBlock (BlockSpec tableId columnId blockId) beginRowId endRowId columnType
                   cmdData = head $ LBS.toChunks $ Bin.encode newBlockCommand
               ZMQ.send s [] cmdData
               reply <- ZMQ.receive s
               let response = (Bin.decode $ LBS.fromChunks [reply] :: Response)
               when (isFailure response) $
                    warningM moduleName $ "Failed creating block " ++ show blockId ++ " on " ++ peer
-              return ())
+              return (fromIntegral beginRowId, fromIntegral endRowId))
 
       calculateBestPeer :: State -> ColumnData -> IO (Maybe PeerName)
       calculateBestPeer state columnData = do
@@ -403,7 +452,7 @@ appendRow timeSeriesName columnsAndValues state =
         meanBlockCount <- (calcMeanBlockCount peersData :: IO Double)
         blockCountStDev <- (calcBlockCountStDev peersData :: IO Double)
 
-        let considerablePeers = filter (\peer -> let blockCount = fromIntegral $ Peers.getBlockCount peer
+        let considerablePeers = filter (\peer -> let blockCount = fromIntegral $ getBlockCount peer
                                                      in blockCount >= (meanBlockCount - blockCountStDev / 2) &&
                                                         blockCount <= (meanBlockCount + blockCountStDev / 2))
                                 preferredPeers
@@ -411,12 +460,12 @@ appendRow timeSeriesName columnsAndValues state =
         -- Calculate a heuristic for each of the considerable peers.
         -- The peer with the highest number wins. If there are no considerable peers, find
         -- the overall least utilized peer
-        -- putStrLn $ show $ Peers.getPeerName $ head considerablePeers
-        -- putStrLn $ show $ getPeerDistance $ Peers.getPeerName $ head considerablePeers
+        -- putStrLn $ show $ getPeerName $ head considerablePeers
+        -- putStrLn $ show $ getPeerDistance $ getPeerName $ head considerablePeers
         case considerablePeers of
           [] -> getLeastUtilizedPeer peersData
           _ -> do
-            let scorePeer peer = negate $ (getPeerDistance $ Peers.getPeerName peer) + (Peers.getBlockCount peer)
+            let scorePeer peer = negate $ (getPeerDistance $ getPeerName peer) + (getBlockCount peer)
                 peerScores = map scorePeer considerablePeers
                 bestPeer = snd $ maximumBy (comparing fst) $ zip peerScores considerablePeers
             return $ Just $ getPeerName bestPeer
@@ -508,17 +557,20 @@ instance JSON ColumnData where
                           ("columnId", showJSON $ getColumnId x),
                           ("type", showJSON $ getColumnType x),
                           ("blocks", showJSON $ getBlocks x),
-                          ("ranges", showJSON $ getBlockRanges x)
+                          ("ranges", showJSON $ getBlockRanges x),
+                          ("allocatedBlocks", showJSON $ getAllocatedBlocks x)
                          ]
     readJSON (JSObject objData') =
         let objData = fromJSObject objData'
             l fieldName = lookup fieldName objData -- some shorthand
         in
-          case (l "name", l "columnId", l "blocks", l "type", l "ranges") of
-            (Just nameD, Just columnIdD, Just blocksD, Just typeD, Just blockRangesD) ->
-                case (readJSON nameD, readJSON columnIdD, readJSON blocksD, readJSON typeD, readJSON blockRangesD) of
-                  (Ok name, Ok columnId, Ok blocks, Ok columnType, Ok blockRanges) ->
-                      Ok $ ColumnData name columnId columnType blocks blockRanges
+          case (l "name", l "columnId", l "blocks", l "type", l "ranges", l "allocatedBlocks") of
+            (Just nameD, Just columnIdD, Just blocksD, Just typeD, Just blockRangesD,
+             Just allocatedBlocksD) ->
+                case (readJSON nameD, readJSON columnIdD, readJSON blocksD, readJSON typeD,
+                      readJSON blockRangesD, readJSON allocatedBlocksD) of
+                  (Ok name, Ok columnId, Ok blocks, Ok columnType, Ok blockRanges, Ok allocatedBlocks) ->
+                      Ok $ ColumnData name columnId columnType blocks allocatedBlocks blockRanges
                   _ -> Error "Bad types for ColumnData"
             _ -> Error "Bad object structure for ColumnData"
     readJSON _ = Error "Bad format for ColumnData"

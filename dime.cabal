@@ -12,7 +12,9 @@ executable dime-data-client
     build-depends: QuickCheck -any, base -any, vector -any, data-default -any,
                    zeromq3-haskell -any, haskeline -any, binary -any, bytestring -any,
                    hslogger -any, array -any, split -any, containers -any, json -any,
-                   network -any
+                   network -any, parallel -any, deepseq -any, mtl -any, unix -any,
+                   filepath -any, base64-bytestring -any, zlib -any, ConfigFile -any,
+                   MissingH -any
     main-is: SimpleDataClient.hs
     buildable: True
     hs-source-dirs: src
@@ -22,7 +24,9 @@ executable dime-data-server
     build-depends: QuickCheck -any, base -any, vector -any, data-default -any,
                    zeromq3-haskell -any, haskeline -any, binary -any, bytestring -any,
                    hslogger -any, array -any, split -any, containers -any, json -any,
-                   network -any
+                   network -any, parallel -any, deepseq -any, mtl -any, unix -any,
+                   filepath -any, base64-bytestring -any, zlib -any, ConfigFile -any,
+                   MissingH -any
     main-is: DataServer.hs
     buildable: True
     hs-source-dirs: src
@@ -35,7 +39,9 @@ executable dime-web-server
                    hslogger -any, array -any, split -any, containers -any, json -any,
                    text -any, http-types -any, wai -any, stm -any, warp -any,
                    transformers -any, directory -any, conduit -any, wai-extra -any,
-                   old-locale -any, PSQueue -any, resourcet -any, network -any, old-time -any
+                   old-locale -any, PSQueue -any, resourcet -any, network -any, old-time -any,
+                   mtl -any, parsec -any, pretty -any, ConfigFile -any,
+                   MissingH -any
     main-is: WebServer.hs
     buildable: True
     hs-source-dirs: src

@@ -1,0 +1,500 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<html> <head>
+<title>The Flow time series manipulation language</title>
+
+<style>
+.type-var { font-style: italic; }
+pre { border-left: 4px solid lightblue; margin-left: 3em; padding-left: 1em; }
+table { margin: 1em; margin-left: 3em;}
+ul { margin-left: 3em; padding-left: 0}
+</style>
+</head>
+
+<body>
+<h1>The Flow Language</h1>
+
+The Flow programming language is a language for manipulating time series data as stored in the DIME
+time series database. It has core functionality for working with data that varies over time that
+makes it easy to work with to accomplish specific tasks as well as complicated enough to perform
+advanced analysis.
+
+It is a strict, strongly-typed, functional language (with side effects) based off of the syntax (and
+a bit of the design) of Haskell. It is a high-level language, hiding the internal details of how
+DIME manages the time series data. It also emphasizes the principle of DRY (Don't repeat yourself)
+which means there should only be one preferred way of doing things. It is a dynamically-typed
+language, deferring type checking to runtime, rather than enforcing type constraints during compile
+time. The following is a (hopefully) complete specification of the language syntax and semantics. It
+is not, however, a full specification of the variety of modules and functions that can also be used
+in a Flow program. For more information on these, visit FlowBase.
+
+<h2>Comments</h2>
+
+Comments in flow are written the same way as Haskell
+
+<pre><code>
+-- This is a single line comment
+{--
+    This is a multiline comment
+--}</code></pre>
+
+Here is a quick shortcut that is useful when debugging Flow programs
+
+<pre><code>
+{--}
+This line is can be commented out by removing the } in the previous line.
+--}</code></pre>
+
+<h2>Datatypes</h2> As a strongly-typed language, Flow will not do implicit conversions for
+you. However, it is not a statically type-checked language, which means that it will only complain
+about type errors during run-time. It is useful to understand how Flow denotes types, so that you
+can enforce type constraints as soon as they become meaningful, and hence catch errors as quickly as
+possible. All data types must start with capital letters, this is to help the compiler distinguish
+data type names from type variables in function signatures.
+
+The following types are builtin to Flow:
+
+<ul>
+  <li><code>Integer</code></li>
+  <li><code>Boolean</code></li>
+  <li><code>String</code></li>
+  <li><code>Double</code></li>
+  <li><code>Duration</code></li>
+  <li><code>DateTime</code></li>
+  <li><code>TimeSeriesCollection <span class="type-var">a</span></code></li>
+  <li><code>TimeSeries <span class="type-var">dt</span> <span class="type-var">a</span></code></li>
+  <li>Functions</li>
+</ul>
+
+Flow does not currently have any support for user-defined data types.
+
+The syntax <code>a :: Type</code> is an assertion that the value <code>a</code> has type
+<code>Type</code>. These assertions can occur anywhere in the code surrounded by parentheses, and
+evaluate to the value of <code>a</code>. They can also occur in the declaration part of a
+<code>let</code> expression, without parentheses.
+
+<h3><code>Integer</code></h3>
+
+The <code>Integer</code> type represents a 64-bit twos-complement integer. The following are all examples of
+values of the <code>Integer</code> type:
+
+<pre><code>I42
+I-45
+I1
+I0</code></pre>
+
+Note that all integers must be prefixed with the I character; otherwise, they will be interpreted as <code>Double</code>s.
+
+<h3><code>Boolean</code></h3>
+
+A <code>Boolean</code> represents a boolean value. It can only take on two values <code>True</code>
+and <code>False</code>.
+
+<h3><code>String</code></h3>
+
+A <code>String</code> is a sequence of UTF-8 characters. Unlike Haskell, in Flow, String is not a specific
+instance of the list class, it is its own type. A <code>String</code> literal is written in Flow by
+surrounding a sequence of characters with double or single quotes. Multiline strings can be written
+as in python using either triple double or triple single-quotes. The following are examples of
+strings
+
+<pre><code>'Hello, "world"!'
+"Hello, 'world'!"
+"""
+This is  a multiline string surrounded by triple "s. It can contain
+as many lines as you'd like and can contain both single quotes and sequences of less than three
+double quotes. Sequences of " longer than three can be escaped like so \"\"\"\"\"\".
+"""
+'''An example of a multiline string surrounded by single quotes. The same rules
+apply to these strings as triple quoted " strings, with the exceptions for " now applying to '
+'''</code></pre>
+
+Special characters in strings can be escaped according to the table below
+<table>
+  <tr>
+    <th>Escape code</th>
+    <th>Character(or description)</th>
+  </tr>
+  <tr>
+    <td>\"</td>
+    <td>"</td
+  </tr>
+  <tr>
+    <td>\'</td>
+    <td>'</td>
+  </tr>
+  <tr>
+    <td>\t</td>
+    <td>TAB</td>
+  </tr>
+  <tr>
+    <td>\n</td>
+    <td>NEWLINE</td>
+  </tr>
+  <tr>
+    <td>\r</td>
+    <td>CARRIAGE RETURN</td>
+  </tr>
+  <tr>
+    <td>\xNNNN</td>
+    <td>Unicode character with hexadecimal representation NNNN</td>
+  </tr>
+  <tr>
+    <td>\XNNNNNNNN</td>
+    <td>Unicode character with hexadeimcal representation NNNNNNNN</td>
+  </tr>
+</table>
+
+<h3><code>Double</code></h3>
+
+A double-precision floating point number, according to the IEE 754 standard. All non-prefixed
+numeric literals in Flow are automatically <code>Double</code>s. The following are examples of <code>Double</code> literals.
+
+<pre><code>5
+0.
+524.
+0.2415
+0.4352
+.534
+242.1231
+-4
+-4.
+-125.12
+-.214
+-0.241</code></pre>
+
+<h3><code>Duration</code></h3>
+
+A <code>Duration</code> represents an amount of time. Internally, it is stored as the number of
+milliseconds between two events. Examples (and non-examples) of <code>Duration</code> literals are
+
+<pre><code>16d -- 16 days
+9ms -- 9 milliseconds
+16d9ms -- 16 days, 9 milliseconds
+5s -- 5 seconds
+9ms16d -- non-example, units of greater magnitude must come first.
+-16d -- 16 days ago</code></pre>
+
+In general, the format for a <code>Duration</code> literal is
+<code>[-][<i>N</i>Y][<i>N</i>M][<i>N</i>D][<i>N</i>h][<i>N</i>m][<i>N</i>s][<i>N</i>ms]</code> where
+<i>N</i> represent arbitrary non-negative numbers and at least one of these need to be specified.
+
+<h3><code>DateTime</code></h3>
+
+A <code>DateTime</code> represents a specific point in time. It has millisecond level precision. It
+is specified by prefixing a value in the <code>%Y-%m-%d+%H:%M:%S.%MS</code> format with the @
+sign. Thus, the following are examples of <code>DateTime</code> objects:
+
+<pre><code>@2012-01-21+17:01:54.121 -- 21 January 2012 at 5:01:54.121 PM</pre></code>
+
+All fields of a <code>DateTime</code> object must be given.
+
+<h3><code>TimeSeriesCollection <span class="type-var">a</span></code></h3>
+
+A <code>TimeSeriesCollection</code> is a collection of similarly aligned time series. The alignment
+of the time series is given as a <em>type variable,</em> which allows the type system to enforce
+rules on alignment. <code>TimeSeriesCollection</code> objects can only be referred to; you cannot
+write a <code>TimeSeriesCollection</code> literal in the code. However, you can refer to any DIME
+TimeSeries as a <code>TimeSeriesCollection</code> by prefixing the name of the time series with the
+# character. So, for example, the following all <em>evaluate</em> to <code>TimeSeriesCollection</code>
+objects (assuming the appropriate time series exist).
+
+<pre><code>#AAPL
+#MSFT</code></pre>
+
+Please note, that, since these are references not values, evaluating these may cause runtime errors
+if the appropriately named time series cannot be found.
+
+You can also get a reference to a DIME time series whose name you only know at runtime (in the form
+of a <code>String</code>). To lookup a time series, use the <code>timeSeries</code> function, as
+below, where <code>seriesName</code> is the name of a series you'd like to lookup.
+
+<pre><code>timeSeries seriesName
+timeSeries "AAPL" -- Equivalent to #AAPL</code></pre>
+
+<code>TimeSeriesCollection</code> objects have a few properties. These properties can be retrieved
+using accessor functions, which, unlike most Flow functions, can be written after the
+<code>TimeSeriesCollection</code> objects, and with no separating whitespace. The table below
+summarizes the fields on a <code>TimeSeriesCollection</code> object.
+
+<table>
+  <tr>
+    <th>Accessor</th>
+    <th>Type</th>
+    <th>Field Description</th>
+  </tr>
+  <tr>
+    <td><code>.name</code></td>
+    <td><code>String</code></td>
+    <td>The name of the time series collection (i.e. <code>#AAPL.name</code> is <code>"AAPL"</code>).</td>
+  </tr>
+  <tr>
+    <td><code>.tableId</code></td>
+    <td><code>Integer</code></td>
+    <td>The numeric table ID assigned to this time series, by the DIME runtime. A negative value
+      indicates a temporary <code>TimeSeriesCollection</code></td>
+  </tr>
+  <tr>
+    <td><code>.length</code></td>
+    <td><code>Integer</code></td>
+    <td>The number of samples in this time series</td>
+  </tr>
+  <tr>
+    <td><code>.startTime</code></td>
+    <td><code>DateTime</code></td>
+    <td>The time at which this time series started being recorded</td>
+  </tr>
+  <tr>
+    <td><code>.dataFrequency</code></td>
+    <td><code>Duration</code></td>
+    <td>The time in between two successive samples</td>
+  </tr>
+</table>
+
+The following are both valid ways to extract the <code>.dataFrequency</code> field from a
+<code>TimeSeriesCollection</code>
+
+<pre><code>#AAPL.dataFrequency -- specialized syntax
+(.dataFrequency) #AAPL -- regular function application syntax</code></pre>
+
+In addition to these field accessors, <code>TimeSeriesCollection</code> objects also have
+<em>column</em> accessors. These are used to extract the individual <code>TimeSeries</code> out of
+the collection. These accessors can also be used to create subcollections. These accessors are
+prefixed with a colon. Here are a few examples:
+
+<pre><code>#AAPL:price -- the price time series of the #AAPL TimeSeriesCollection
+#AAPL:price:pe -- a new TimeSeriesCollection containing the price and P/E ratio of #AAPL</code></pre>
+
+<h3><code>TimeSeries <span class="type-var">d</span> <span class="type-var">a</span></code></h3>
+
+A <code>TimeSeries</code> is a mapping of <code>DateTime</code> objects to values of the type given
+by the type variable <span class="type-var">d</span>. In this case, <span class="type-var">d</span>
+must be a <em>primitive type</em>, which is one of <code>Integer</code>, <code>String</code>, or
+<code>Double</code> (basically any datatype that can be stored in a DIME column). Like
+<code>TimeSeriesCollection</code> objecs, <code>TimeSeries</code> also include an alignment in their
+type signature, to facilitate with alignment checking. The alignment parameter is copied over when a
+<code>TimeSeries</code> is extracted from a <code>TimeSeriesCollection</code> object. That is,
+suppose
+<pre><code>#AAPL :: TimeSeriesCollection 60.</code></pre>
+Then,
+<pre><code>#AAPL:price :: TimeSeries Double 60,</code></pre>
+assuming that <code>price</code> is a DIME column with type <code>Double</code>.
+
+Like <code>TimeSeriesCollection</code> objects, <code>TimeSeries</code> also have fields that can be
+accessed with accessor functions. The following table summarizes these fields.
+
+<table>
+  <tr>
+    <th>Accessor</th>
+    <th>Type</th>
+    <th>Field Description</th>
+  </tr>
+  <tr>
+    <td><code>.name</code></td>
+    <td><code>String</code></td>
+    <td>The name of the time series.</td>
+  </tr>
+  <tr>
+    <td><code>.columnId</code></td>
+    <td><code>Integer</code></td>
+    <td>The DIME column ID corresponding to this time series (a negative value indicates that this
+  is a temporary series) </td>
+  </tr>
+</table>
+
+<h3>Functions</h3>
+
+As a functional programming language, Flow follows the Haskell convention for denoting the types of
+functions.
+
+The basic constructor for a function type in Flow is <code>a -&gt; b</code> which designates a
+function from type <code>a</code> to <code>b</code>. Like in Haskell, Flow functions can return
+functions. This means that a multi-argument function type can be written as
+
+<pre><code>timeDiff :: DateTime -> DateTime -> Duration</code></pre>
+
+This is a function that takes in two <code>DateTime</code> objects and returns their difference as a
+<code>Duration</code>. It can be invoked as such (assuming <code>a</code> and <code>b</code> are two
+<code>DateTime</code> values).
+
+<pre><code>timeDiff a b :: Duration</code></pre>
+
+Note that the <code> :: Duration</code> part isn't necessary and is only their to clarify the type
+of the <code>timeDiff a b</code> expression.
+
+Like Haskell, functions can be curried (i.e., you don't need to apply a function to all its
+arguments at once).
+
+<pre><code>timeDiff a :: DateTime -> Duration</code></pre>
+
+As a functional language, Flow allows you to use this to define your own functions. So, for example,
+a more complicated way to write <code>timeDiff a b</code> is as follows (this is just for
+illustrative purposes, do not write code like this!).
+
+<pre><code>let partialDiff = timeDiff a
+in partialDiff b</code></pre>
+
+<h2>Program structure</h2>
+A Flow program is an import list, followed by a single expression. The value of this single
+expression is the result of the program.
+
+<h3>Import expressions</h3>
+
+Import expressions can be used to bring in functions from external libraries. Like Haskell, once a
+module is imported, all its functions are visible in the current scope. Note that, like Haskell, all
+module names are capitalized. Again like Haskell, you can import modules qualified, which means that
+functions within that module must be fully qualified (i.e. must be prefixed with the name of the
+module, followed by a `.'). Suppose there is a module <code>A.B.C</code> containing function
+<code>f</code>. The following examples is an exhaustive list of the ways you can access <code>f</code>.
+
+<pre><code>import A.B.C
+
+f -- works, and returns the value of f, since it has been brought into scope with the import statement above</code></pre>
+
+<pre><code>import qualified A.B.C
+
+f -- doesn't work, since the qualified import has <em>not</em> brought the f function into scope</code></pre>
+
+<pre><code>import qualified A.B.C
+
+A.B.C.f -- works, because we're using the fully qualified name of f</code></pre>
+
+<pre><code>import qualified A.B.C as M
+
+A.B.C.f -- does not work, since A.B.C is not the name of any module (it has been renamed to M in the
+        -- current scope</code></pre>
+
+<pre><code>import qualified A.B.C as M
+
+M.f -- works because it uses the fully qualified name of f (which has been put into module M) by the
+    -- import qualified</code></pre>
+
+<pre><code>import A.B.C
+
+A.B.C.f -- works, because you can always use the fully qualified name, even without an import
+        -- qualified</code></pre>
+
+<pre><code>import A.B.C as M
+
+A.B.C.f -- does not work, since A.B.C is not the name of a module (it was renamed to M by the as
+        -- declaration)</code></pre>
+
+<pre><code>import A.B.C as M
+
+M.f -- works because f is in the M module and you can always use fully qualified names</code></pre>
+
+<h3>Expressions</h3>
+
+There are three types of expressions in Flow: (a) a literal, (b) a function application, or (c) a
+<code>let-in</code> construct. Note that, unlike Haskell, constructs such as <code>if-then-else</code>
+are implemented via functions and constructs such as <code>case-of</code> are unnecessary, since we
+disallow algebraic data types. We have already discussed literals in the first part of this
+manual. We will now discuss function application and the <code>let-in</code> construct.
+
+<h2>Function application</h2>
+
+As a functional language, the topic of function application in Flow is a pretty big one. In Flow,
+like in Haskell, function application is denoted by putting the names of the arguments right after
+the name of the function and separating them with spaces. Thus, we can call the function
+<code>f</code> with arguments <code>x</code> and <code>#AAPL</code> with the code
+<pre><code>f x #AAPL</code></pre>
+
+Functions can also return other functions. As we saw in the section on function types, all multi
+argument functions are indeed functions that return other functions. So, we can write the piece of
+code above in a more convoluted fashion:
+<pre><code>(f x) #AAPL</code></pre>
+
+Although convoluted, this example is a good illustration of the fact that Flow applies arguments one
+at a time, from left to right.
+
+It may be the case that we want to pass the result of a function as the second argument to
+<code>f</code> (perhaps we want to look up a time series by name). In that case, the following will
+<em>not</em> work.
+<pre><code>f x timeSeries "AAPL"</code></pre>
+The Flow system will interpret this as trying to call the <code>f</code> function with the arguments
+<code>x</code>, <code>timeSeries</code>, and <code>"AAPL"</code>. What we need is a construct that
+we can use to somehow "group" together the <code>timeSeries "AAPL"</code> expression. Luckily, we
+can use parentheses for this. Thus, the following works
+<pre><code>f x (timeSeries "AAPL")</code></pre>
+
+Some functions are special, in that they can be written in between other expressions. These
+functions are known as binary operators, and include operations such as addition, subtraction,
+division, multiplication, modulo, exponentiation, etc. Unlike Haskell, Flow does not let the user
+define such functions. These functions are built-in to the system itself. They follow all the
+standard rules of arithmetic. Examples of these operators are given below
+
+<pre><code>5 + 5
+5 / 5
+125 % 15 -- modulo
+9 ** 2 -- exponentiation
+6 & 6 -- bitwise AND
+True && False -- logical AND
+5 == 1 -- equivalence check</code></pre>
+
+Note, that there is no symbolic unary negation operator. To negatve the value of a variable, use the
+<code>negate</code> function.
+<pre><code>negate 5 -- Same thing as -5
+negate I5 -- Same thing as I-5</code></pre>
+As demonstrated above, the type of <code>negate</code> is polymorphic, meaning that it accepts all
+types for which it makes sense. In fact, when we come to the section on <code>TimeSeries</code>
+manipulation, we'll see just how powerful this polymorphism is.
+
+The table below is an exhaustive list of binary operators, their expected types and their return
+types.
+
+<pre><code>TODO: Make the list</code></pre>
+
+<h2><code>Let-in</code> expressions</h2>
+
+So far we have written expressions in just one-single line. Although it is possible to write every
+Flow expression in a single line, for the sake of readability, it is useful to give names to complex
+expressions or to expressions that will be reused. It is also much easier to use recursion when
+there is some mechanisms for naming expressions (although, it is certainly possible to use recursion
+without such a mechanism... search Google for Y fixed point operator). The <code>let-in</code>
+expression lets us name expressions and then reuse them later on
+
+The basic syntax for a <code>let-in</code> expression is as follows
+<pre><code>let {
+    value1 = expr1;
+    value2 = expr2;
+    value3 :: Type;
+    value3 = value3;
+
+    f :: Type1 -> Type2;
+    f x = ...;
+    .
+    .
+} in expression</code></pre>
+
+The names bound in the declaration part of the <code>let-in</code> can be used both from within the
+declaration part and from the <code>in</code> part. The <code>let-in</code> clause evaluates to the
+value of the <code>in</code> expression. Not all expressions in the declaration part must be
+used. In fact, the following is perfectly valid
+<pre><code>let { value1 = extremely hard to compute value }
+in 5</code></pre>
+This code will evaluate to 5. Note that the computation of <code>value1</code> might be optimized
+away by the compiler. This is an important point, as it affects the semantics of programs, if the
+functions in question have side effects. In order to ensure that functions are evaluated, you must
+mention them in the body of the clause (the part after the <code>in</code> keyword).
+
+Finally, note that <code>let-in</code> serves another purpose. It is the gateway into the world of
+side effects. That is, the body of the <code>let-in</code> clause can actually contain multiple
+expressions, separated by commas. The final value of the clause is the value of the final
+expression, but the other expressions will be fully evaluated, and any side effects caused by their
+evaluation will occur. Thus, the actual general form for a <code>let-in</code> expression is
+<pre><code>let {
+    value1 = expr1;
+    value2 = expr2;
+    .
+    .
+} in {
+    bodyexpr1;
+    bodyexpr2;
+    ...;
+    bodyexprn
+}</code></pre>
+If only one expression will be used, you can omit the parentheses. This is the mechanism you'd use
+to enforce that the values of certain expressions in the declaration part are indeed evaluated.
+
+
+
+</body> </html>

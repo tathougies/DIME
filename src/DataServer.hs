@@ -1,6 +1,7 @@
 module Main where
 
 import Database.DIME.DataServer
+import Database.DIME.DataServer.Config
 import Database.DIME.Util
 
 import System.Exit
@@ -40,7 +41,8 @@ options = [ Option "d" ["debug"]
                             Nothing -> do
                               hostName <- getHostName
                               return opt { optLocalAddress = hostName }
-                            Just localAddress ->
+                            Just localAddress -> do
+                                putStrLn $ "Got local address " ++ show localAddress
                                 return opt { optLocalAddress = localAddress })
              "<local-address>")
             "Set the local address"
@@ -56,9 +58,12 @@ main = do
 
   coordinatorName <- case nonOptions of
                        [] -> fail "A coordinator name must be passed into the program"
-                       x -> return $ "tcp://" ++ head x ++ ":8009"
+                       x -> return $ head x
 
   let Options { optDebug = debug, optLocalAddress = localAddress } = opts
   when debug $ setDebugMode
+
+  -- Read config files
+  initDataServerConfig
 
   dataServerMain coordinatorName localAddress

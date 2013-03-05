@@ -1,16 +1,12 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, RecordWildCards, TupleSections, RecordWildCards #-}
 module Database.DIME.Server.Peers
-    ( PeerName(..),
-      PeersInfo(..),
-      PeerInfo(..),
-      PeerResponse(..),
-      empty,
-      getLeastUtilizedPeer,
-      calcMeanBlockCount,
-      calcBlockCountStDev,
+    ( PeerResponse(..),
       peerServer,
 
       mkUpdateCommand,
+      mkTimeSeriesInfoCommand,
+      mkTimeSeriesColumnInfoCommand,
+
       parsePeerResponse
     ) where
 
@@ -21,13 +17,20 @@ import qualified Data.Map as Map
 import qualified Data.PSQueue as PSQ
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import Data.PSQueue (Binding ((:->)))
+import qualified Data.Tree.DisjointIntervalTree as DIT
 import Data.Binary as B
 import Data.Maybe
 import Data.String
+import Data.Int
 
+import Database.DIME
 import Database.DIME.Util
+import Database.DIME.Server.State
+import Database.DIME.Server.Config
+import Database.DIME.DataServer.Command
+import Database.DIME.Memory.Block (ColumnType(..))
 
+import System.Time
 import System.Log.Logger
 import qualified System.ZMQ3 as ZMQ
 
@@ -35,41 +38,50 @@ import qualified Text.JSON as JSON
 
 moduleName = "Database.DIME.Server.Peers"
 
-newtype PeerName = PeerName String -- ZeroMQ peer name
-    deriving (Show, Ord, Eq, IsString, JSON.JSON, Binary)
-
-data PeerInfo = PeerInfo {
-      getPeerName :: PeerName,
-      getBlockCount :: Int -- The number of blocks that this peer is handling
-    }
-
-data PeersInfo = PeersInfo {
-        getPeers :: Map.Map PeerName (TVar PeerInfo),
-        getPeersUsage :: PSQ.PSQ PeerName Int
-      }
-
-data PeerCommand = UpdateInfo PeerName Int
+data PeerCommand = UpdateInfo PeerName Int |
+                   TimeSeriesInfo QueryKey TimeSeriesName |
+                   TimeSeriesColumnInfo QueryKey TimeSeriesName ColumnName
                  deriving (Show, Eq)
 
-data PeerResponse = Ok | InfoRequest
-
-empty :: PeersInfo
-empty = PeersInfo Map.empty PSQ.empty
+data PeerResponse = Ok | InfoRequest |
+                    ObjectNotFound |
+                    TimeSeriesInfoResponse {
+                        tableName :: TimeSeriesName,
+                        tableId :: TableID,
+                        tableLength :: TimeSeriesIx,
+                        columnNamesAndTypes :: [(ColumnName, ColumnType)],
+                        startTime :: ClockTime,
+                        dataFrequency :: Int64
+                    } |
+                    TimeSeriesColumnInfoResponse {
+                        columnName :: ColumnName,
+                        columnId :: ColumnID,
+                        blocks :: [(BlockID, [PeerName])],
+                        rowMappings :: [((Int64, Int64), BlockID)]}
 
 -- | The peer server. This runs on the main server and keeps track of the peer state.
-peerServer :: TVar PeersInfo -> IO ()
-peerServer peersInfo = do
+peerServer :: State -> IO ()
+peerServer serverState = do
   infoM moduleName "DIME peer server starting"
   ZMQ.withContext $ \c ->
       ZMQ.withSocket c ZMQ.Rep $ \s ->
           do
-            ZMQ.bind s "tcp://127.0.0.1:8009"
-            forever $ serve peersInfo s
+            ZMQ.bind s $ "tcp://127.0.0.1:" ++ show coordinatorPort
+            forever $ serve serverState s
   where
-    serve peersInfoVar s = do
+    serve serverState s = do
       line <- ZMQ.receive s
-      let UpdateInfo peerName blockCount = B.decode $ LBS.fromChunks [line]
+      let cmd = B.decode $ LBS.fromChunks [line]
+      response <- case cmd of
+        UpdateInfo peerName blockCount -> doUpdateInfo peerName blockCount serverState
+        TimeSeriesInfo _ tsName -> doTimeSeriesInfo tsName serverState -- query key ignored for now
+        TimeSeriesColumnInfo _ tsName columnName -> doTimeSeriesColumnInfo tsName columnName serverState
+
+      ZMQ.send s [] $ head $ LBS.toChunks $ B.encode $ response
+
+    doUpdateInfo peerName blockCount serverState = do
       peerAdded <- atomically $ do
+        let peersInfoVar = peersRef serverState
         peersInfo <- readTVar peersInfoVar
 
         -- Update or add the peer
@@ -95,35 +107,44 @@ peerServer peersInfo = do
 
         return peerAdded
       when peerAdded $ putStrLn $ "Added peer " ++ show peerName
-      ZMQ.send s [] $ head $ LBS.toChunks $ B.encode $ if peerAdded then InfoRequest else Ok
+      if peerAdded
+       then return InfoRequest
+       else return Ok
+
+    doTimeSeriesColumnInfo tsName columnName serverState = atomically $ do
+      cRes <- lookupColumn tsName columnName serverState
+      case cRes of
+        Nothing -> return ObjectNotFound
+        Just cVar -> do {- Return column info -}
+                  column <- readTVar cVar
+                  let blocks = Map.assocs $ getBlocks column
+                      blocks' = map (\(bId, bData) -> (bId, getOwners bData)) blocks
+                      rowMappings = DIT.assocs $ getBlockRanges column
+                  return $ TimeSeriesColumnInfoResponse {
+                               columnName = getColumnName column,
+                               columnId = getColumnId column,
+                               blocks = blocks',
+                               rowMappings = rowMappings}
+
+    doTimeSeriesInfo tsName serverState = atomically $ do
+      tsRes <- lookupTimeSeries tsName serverState
+      case tsRes of
+        Nothing -> return ObjectNotFound
+        Just tsVar -> do {- Return time series information -}
+                   ts <- readTVar tsVar
+                   let columnInfo = Map.assocs $ getColumns ts
+                   columnNamesAndTypes <-
+                       mapM (\(name, columnVar) ->
+                                 liftM ((name,) . getColumnType) $ readTVar columnVar) columnInfo
+                   return $ TimeSeriesInfoResponse {
+                           tableName = getName ts,
+                           tableId = getTableId ts,
+                           tableLength = getLength ts,
+                           columnNamesAndTypes = columnNamesAndTypes,
+                           startTime = getStartTime ts,
+                           dataFrequency = getDataFrequency ts}
 
     calcPeerPriority = getBlockCount -- this is the function you'd change to give a new heuristic to how peers are ranked
-
-getLeastUtilizedPeer :: PeersInfo -> IO (Maybe PeerName)
-getLeastUtilizedPeer peersInfo = do
-  let peersUsage = getPeersUsage peersInfo
-      peers = getPeers peersInfo
-  case PSQ.findMin peersUsage of
-    Nothing -> return Nothing
-    Just (k :-> p) -> do
-      let peerVar = fromJust $ Map.lookup k peers
-      peerData <- readTVarIO peerVar
-      return $ Just $ getPeerName peerData
-
-calcMeanBlockCount :: Floating a => PeersInfo -> IO a
-calcMeanBlockCount state = do
-    peers <- mapM readTVarIO $ Map.elems $ getPeers state
-    let peerBlockCount = map (fromIntegral.getBlockCount) peers
-    return $ (sum peerBlockCount) / (fromIntegral $ length peerBlockCount)
-
-calcBlockCountStDev :: Floating a => PeersInfo -> IO a
-calcBlockCountStDev state = do
-    peers <- mapM readTVarIO $ Map.elems $ getPeers state
-    let peerBlockCount = map (fromIntegral.getBlockCount) peers
-    meanBlockCount <- calcMeanBlockCount state
-    let variance = sum (map (\x -> (x - meanBlockCount) * (x - meanBlockCount)) peerBlockCount) /
-                   (fromIntegral $ length peerBlockCount)
-    return $ sqrt variance
 
 parsePeerResponse :: BS.ByteString -> PeerResponse
 parsePeerResponse reply = decode $ LBS.fromChunks [reply]
@@ -132,18 +153,86 @@ mkUpdateCommand :: PeerName -> Int -> BS.ByteString
 mkUpdateCommand zmqName blockCount = let updateCmd = UpdateInfo zmqName blockCount
                                      in head $ LBS.toChunks $ encode updateCmd
 
+mkTimeSeriesInfoCommand :: QueryKey -> TimeSeriesName -> BS.ByteString
+mkTimeSeriesInfoCommand queryKey tsName = let infoCmd = TimeSeriesInfo queryKey tsName
+                                          in head $ LBS.toChunks $ encode infoCmd
+
+mkTimeSeriesColumnInfoCommand :: QueryKey -> TimeSeriesName -> ColumnName -> BS.ByteString
+mkTimeSeriesColumnInfoCommand queryKey tsName columnName =
+    let infoCmd = TimeSeriesColumnInfo queryKey tsName columnName
+    in head $ LBS.toChunks $ encode infoCmd
+
 instance Binary PeerCommand where
-    get = liftM2 UpdateInfo get get
+    get = do
+      tag <- (get :: Get Int8)
+      case tag of
+        1 {- UpdateInfo -} -> liftM2 UpdateInfo get get
+        2 {- TimeSeriesInfo -} -> liftM2 TimeSeriesInfo get get
+        3 {- TimeSeriesColumnInfo -} -> liftM3 TimeSeriesColumnInfo get get get
+
     put (UpdateInfo peerName blockCount) = do
+      put (1 :: Int8)
       put peerName
       put blockCount
+    put (TimeSeriesInfo key tsName) = do
+      put (2 :: Int8)
+      put key
+      put tsName
+    put (TimeSeriesColumnInfo key tsName columnName) = do
+      put (3 :: Int8)
+      put key
+      put tsName
+      put columnName
+
+instance Binary ClockTime where
+    put (TOD seconds picoseconds) = put seconds >> put picoseconds
+    get = liftM2 TOD get get
 
 instance Binary PeerResponse where
     get = do
-      token <- (get :: Get Int)
+      token <- (get :: Get Int8)
       case token of
         1 -> return Ok
         2 -> return InfoRequest
+        3 -> return ObjectNotFound
+        4 -> doTimeSeriesResponse
+        5 -> doTimeSeriesColumnResponse
         _ -> fail "Bad code for PeerResponse"
-    put Ok = put (1 :: Int)
-    put InfoRequest = put (2 :: Int)
+     where
+       doTimeSeriesResponse = do
+           tableName <- get
+           tableId <- get
+           tableLength <- get
+           columnNamesAndTypes <- get
+           startTime <- get
+           dataFrequency <- get
+           return $ TimeSeriesInfoResponse {
+                              tableName = tableName,
+                              tableId = tableId,
+                              tableLength = tableLength,
+                              columnNamesAndTypes = columnNamesAndTypes,
+                              startTime = startTime,
+                              dataFrequency = dataFrequency}
+       doTimeSeriesColumnResponse = do
+           columnName <- get
+           columnId <- get
+           blocks <- get
+           rowMappings <- get
+           return $ TimeSeriesColumnInfoResponse {..}
+    put Ok = put (1 :: Int8)
+    put InfoRequest = put (2 :: Int8)
+    put ObjectNotFound = put (3 :: Int8)
+    put (TimeSeriesInfoResponse {..}) = do
+        put (4 :: Int8)
+        put tableName
+        put tableId
+        put tableLength
+        put columnNamesAndTypes
+        put startTime
+        put dataFrequency
+    put (TimeSeriesColumnInfoResponse {..}) = do
+        put (5 :: Int8)
+        put columnName
+        put columnId
+        put blocks
+        put rowMappings

@@ -1,5 +1,8 @@
 module Main where
 
 import Database.DIME.Server
+import Database.DIME.Server.Config
 
-main = serverMain
+main = do
+  initServerConfig
+  serverMain

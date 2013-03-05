@@ -6,14 +6,24 @@ module Database.DIME.DataServer.Response
 import Database.DIME.Memory.Block (ColumnValue, ColumnType)
 import Database.DIME.Memory.BlockInfo
 
+import Language.Flow.Execution.Types
+
+import qualified Data.Text as T
 import Data.Binary
 import Data.Int
 
 import Control.Monad
 
+data QueryResult = DoubleResult {-# UNPACK #-} !Double |
+                   IntResult {-# UNPACK #-} !Int64 |
+                   StringResult !T.Text |
+                   TimeSeriesResult [(ClockTime, ColumnValue)]
+
 data Response = Ok |
                 BlockInfoResponse BlockInfo |
                 FetchRowsResponse [[ColumnValue]] |
+                QueryResponse QueryResult |
+                MapResponse ColumnType |
                 -- Failures
                 BlockAlreadyExists |
                 BlockDoesNotExist |
@@ -23,21 +33,29 @@ data Response = Ok |
               deriving (Show)
 
 okTag, fetchRowsResponseTag, blockAlreadyExistsTag, blockDoesNotExistTag, blockInfoResponseTag, failTag :: Int8
-inconsistentTypesTag, inconsistentArgumentsTag :: Int8
+inconsistentTypesTag, inconsistentArgumentsTag, queryResponseTag, mapResponseTag :: Int8
 okTag = 1
 blockInfoResponseTag = 2
 fetchRowsResponseTag = 3
-blockAlreadyExistsTag = 4
-blockDoesNotExistTag = 5
-failTag = 6
-inconsistentTypesTag = 7
-inconsistentArgumentsTag = 8
+queryResponseTag = 4
+mapResponseTag = 5
+blockAlreadyExistsTag = 6
+blockDoesNotExistTag = 7
+failTag = 8
+inconsistentTypesTag = 9
+inconsistentArgumentsTag = 10
 
 instance Binary Response where
     put Ok = put okTag
     put (BlockInfoResponse resp) = do
                            put blockInfoResponseTag
                            put resp
+    put (QueryResponse dat) = do
+                           put queryResponseTag
+                           put dat
+    put (MapResponse dataType) = do
+                           put mapResponseTag
+                           put dataType
     put BlockAlreadyExists = put blockAlreadyExistsTag
     put BlockDoesNotExist = put blockDoesNotExistTag
     put InconsistentTypes = put inconsistentTypesTag
@@ -55,18 +73,38 @@ instance Binary Response where
         1 {- okTag -} -> return Ok
         2 {- blockInfoResponseTag -} -> doBlockInfoResponse
         3 {- fetchRowsResponseTag -} -> doFetchRowsResponse
-        4 {- blockAlreadyExistsTag -} -> return BlockAlreadyExists
-        5 {- blockDoesNotExistTag -} -> return BlockDoesNotExist
-        6 {- failTag -} -> doFailResponse
-        7 {- inconsistentTypesTag -} -> return InconsistentTypes
-        8 {- inconsistentArgumentsTag -} -> return InconsistentArguments
+        4 {- queryResponseTag -} -> doFetchQueryResponse
+        5 {- mapResponseTag -} -> doMapResponse
+        6 {- blockAlreadyExistsTag -} -> return BlockAlreadyExists
+        7 {- blockDoesNotExistTag -} -> return BlockDoesNotExist
+        8 {- failTag -} -> doFailResponse
+        9 {- inconsistentTypesTag -} -> return InconsistentTypes
+        10 {- inconsistentArgumentsTag -} -> return InconsistentArguments
       where
         doBlockInfoResponse = liftM BlockInfoResponse get
         doFetchRowsResponse = liftM FetchRowsResponse get
         doFailResponse = liftM Fail get
+        doFetchQueryResponse = liftM QueryResponse get
+        doMapResponse = liftM MapResponse get
+
+instance Binary QueryResult where
+    put (DoubleResult d) = do
+      put doubleResultTag
+      put d
+    put (IntResult i) = do
+      put intResultTag
+      put i
+    put (StringResult t) = do
+      put stringResultTag
+      put t
+    put (TimeSeriesResult tsData) = do
+      put timeSeriesTag
+      
 
 isFailure :: Response -> Bool
 isFailure Ok = False
 isFailure (BlockInfoResponse _) = False
 isFailure (FetchRowsResponse _) = False
+isFailure (QueryResponse _) = False
+isFailure (MapResponse _) = False
 isFailure _ = True

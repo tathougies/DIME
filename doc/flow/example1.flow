@@ -1,0 +1,4 @@
+let correlateStockPrices ts1 ts2 =
+       let (alignedTS1, alignedTS2) = align Average Lerp Discard ts1 ts2
+       in correlation alignedTS1 alignedTS2
+in correlateStockPrices #AAPL:price #MSTF:price

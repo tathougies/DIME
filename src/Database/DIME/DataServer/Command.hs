@@ -1,34 +1,56 @@
 module Database.DIME.DataServer.Command
-    ( Command(..)
+    ( Command(..),
+      QueryKey(..)
     ) where
 import Database.DIME
 import Database.DIME.Memory.Block (ColumnValue, ColumnType)
+import Database.DIME.Memory.Operation.Mappable
 
+import qualified Data.Text as T
 import Data.Binary
 import Data.Int
 import Data.Typeable
 
 import Control.Monad
 
-updateRowsTag, fetchRowsTag, newBlockTag, deleteBlockTag, blockInfoTag :: Int8
+import Language.Flow.Execution.Types -- for Binary Text intance
+
+import Text.JSON
+
+updateRowsTag, fetchRowsTag, newBlockTag, deleteBlockTag, blockInfoTag, mapTag, runQueryTag :: Int8
+runQueryTag = 0
 updateRowsTag = 1
 fetchRowsTag = 2
 newBlockTag = 3
 deleteBlockTag = 4
 blockInfoTag = 5
+mapTag = 6
+
+-- | Identifies running queries. Used by nodes to make requests in order to see a consistent state
+newtype QueryKey = QueryKey Int64
+    deriving (Show, Read, Ord, Eq, Num, Enum, JSON, Binary)
 
 -- | Represents a data node command
 data Command = UpdateRows TableID [RowID] [ColumnID] [[ColumnValue]] |
-               FetchRows TableID [RowID] [ColumnID] |
+               FetchRows TableID [(RowID,  RowID)] [ColumnID] |
 
                -- Block commands
-               NewBlock TableID ColumnID BlockID RowID RowID ColumnType |
-               DeleteBlock TableID ColumnID BlockID |
-               BlockInfo TableID ColumnID BlockID
+               NewBlock BlockSpec RowID RowID ColumnType |
+               DeleteBlock BlockSpec |
+               BlockInfo BlockSpec |
+
+               TransferBlock BlockSpec BlockSpec String |
+
+               Map MapOperation [BlockSpec] BlockSpec RowID |
+               --Calc CalcOperation BlockSpec |
+               {-
+               Reduce ReduceOperation TableID ColumnID BlockID |
+               { -}
+
+               RunQuery QueryKey T.Text
              deriving (Show, Read)
 
 instance Binary Command where
-
     put (UpdateRows tableId rowIds columnIds columnValues) = do
                           put updateRowsTag
                           put tableId
@@ -40,34 +62,44 @@ instance Binary Command where
                           put tableId
                           put rowIds
                           put columnIds
-    put (NewBlock tableId columnId blockId startIndex endIndex blockType) = do
+    put (NewBlock blockSpec startIndex endIndex blockType) = do
                           put newBlockTag
-                          put tableId
-                          put columnId
-                          put blockId
+                          put blockSpec
                           put startIndex
                           put endIndex
                           put blockType
-    put (DeleteBlock tableId columnId blockId) = do
+    put (DeleteBlock blockSpec) = do
                           put deleteBlockTag
-                          put tableId
-                          put columnId
-                          put blockId
-    put (BlockInfo tableId columnId blockId) = do
+                          put blockSpec
+    put (BlockInfo blockSpec) = do
                           put blockInfoTag
-                          put tableId
-                          put columnId
-                          put blockId
+                          put blockSpec
+    put (Map op inputs output firstRow) = do
+                          put mapTag
+                          put op
+                          put inputs
+                          put output
+                          put firstRow
+    put (RunQuery queryKey progTxt) = do
+                          put runQueryTag
+                          put queryKey
+                          put progTxt
 
     get = do
       tag <- (get :: Get Int8)
       case tag of
+        0 {- runQueryTag -} -> getRunQuery
         1 {- updateRowsTag -} -> getUpdateRows
         2 {- fetchRowsTag -} -> getFetchRows
         3 {- newBlockTag -} -> getNewBlock
         4 {- deleteBlockTag -} -> getDeleteBlock
         5 {- blockInfoTag -} -> getBlockInfo
+        6 {- mapTag -} -> getMap
      where
+       getRunQuery = do
+            queryKey <- get
+            progTxt <- get
+            return $ RunQuery queryKey progTxt
        getUpdateRows = do
             tableId <- get
             rowIds <- get
@@ -80,20 +112,16 @@ instance Binary Command where
             columnIds <- get
             return $ FetchRows tableId rowIds columnIds
        getNewBlock = do
-            tableId <- get
-            columnId <- get
-            blockId <- get
+            blockSpec <- get
             rowStartId <- get
             rowEndId <- get
             blockType <- get
-            return $ NewBlock tableId columnId blockId rowStartId rowEndId blockType
-       getDeleteBlock = do
-            tableId <- get
-            columnId <- get
-            blockId <- get
-            return $ DeleteBlock tableId columnId blockId
-       getBlockInfo = do
-            tableId <- get
-            columnId <- get
-            blockId <- get
-            return $ BlockInfo tableId columnId blockId
+            return $ NewBlock blockSpec rowStartId rowEndId blockType
+       getDeleteBlock = liftM DeleteBlock get
+       getBlockInfo = liftM BlockInfo get
+       getMap = do
+            op <- get
+            inputs <- get
+            output <- get
+            firstRow <- get
+            return $ Map op inputs output firstRow

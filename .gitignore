@@ -5,3 +5,7 @@ cabal-dev
 *.chi
 *.chs.h
 .virthualenv
+dime.cfg
+dime-data
+timeSeriesData.json
+TODO
