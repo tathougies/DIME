@@ -1,5 +1,6 @@
 module Database.DIME.DataServer.Response
     (Response(..),
+     QueryResult(..),
      isFailure)
     where
 
@@ -14,10 +15,13 @@ import Data.Int
 
 import Control.Monad
 
+import System.Time
+
 data QueryResult = DoubleResult {-# UNPACK #-} !Double |
                    IntResult {-# UNPACK #-} !Int64 |
                    StringResult !T.Text |
                    TimeSeriesResult [(ClockTime, ColumnValue)]
+              deriving (Show)
 
 data Response = Ok |
                 BlockInfoResponse BlockInfo |
@@ -87,6 +91,12 @@ instance Binary Response where
         doFetchQueryResponse = liftM QueryResponse get
         doMapResponse = liftM MapResponse get
 
+doubleResultTag, intResultTag, stringResultTag, timeSeriesResultTag :: Int8
+doubleResultTag = 1
+intResultTag = 2
+stringResultTag = 3
+timeSeriesResultTag = 4
+
 instance Binary QueryResult where
     put (DoubleResult d) = do
       put doubleResultTag
@@ -98,8 +108,16 @@ instance Binary QueryResult where
       put stringResultTag
       put t
     put (TimeSeriesResult tsData) = do
-      put timeSeriesTag
-      
+      put timeSeriesResultTag
+      put tsData
+
+    get = do
+      tag <- (get :: Get Int8)
+      case tag of
+        1 {- doubleResultTag -} -> liftM DoubleResult get
+        2 {- intResultTag -} -> liftM IntResult get
+        3 {- stringResultTag -} -> liftM StringResult get
+        4 {- timeSeriesResultTag -} -> liftM TimeSeriesResult get
 
 isFailure :: Response -> Bool
 isFailure Ok = False

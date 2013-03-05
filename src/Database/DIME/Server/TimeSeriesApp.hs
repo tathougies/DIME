@@ -71,7 +71,7 @@ timeSeriesApp state timeSeriesName path request =
         case method request of
           Right PUT -> badRequest -- Update request
           Right POST -> do -- Append data request
-            postData <- sourceToLBS $ requestBody request
+            postData <- sourceToBS $ requestBody request
             let rowData = rowDataFromPostData postData
             timeSeriesR <- atomicallyR $ lookupTimeSeries timeSeriesName state
             case timeSeriesR of

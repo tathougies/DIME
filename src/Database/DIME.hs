@@ -11,6 +11,8 @@ import Data.Binary
 import Control.Monad
 import Control.DeepSeq
 
+import System.Time
+
 import Text.JSON
 
 newtype BlockID = BlockID Int64
@@ -51,6 +53,10 @@ instance Binary BlockSpec where
       cId <- get
       bId <- get
       return $ BlockSpec tId cId bId
+
+instance Binary ClockTime where
+    put (TOD seconds picoseconds) = put seconds >> put picoseconds
+    get = liftM2 TOD get get
 
 instance JSON BlockSpec where
     showJSON (BlockSpec tableId columnId blockId) = showJSON $ (tableId, columnId, blockId)

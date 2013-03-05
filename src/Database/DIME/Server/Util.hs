@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Database.DIME.Server.Util
     (pathHead, liftSTM, atomicallyR,
-     normalizedPath, method, sourceToLBS,
+     normalizedPath, method, sourceToBS,
      failOnError
      ) where
 
@@ -9,11 +9,11 @@ import Control.Monad
 import Control.Monad.IO.Class
 import Control.Concurrent.STM
 
-import Data.Text
+import Data.Text hiding (reverse)
 import Data.Maybe
 import Data.String
 import Data.Conduit
-import Data.Conduit.Util
+import Data.Conduit.Text as CT
 import qualified Data.ByteString as BS
 
 import Network.Wai
@@ -40,11 +40,14 @@ normalizedPath [] = []
 
 method = parseMethod.requestMethod
 
-sourceToLBS :: Monad m => Source m BS.ByteString -> m BS.ByteString
-sourceToLBS s = s $$ (sinkState BS.empty append finish)
+sourceToBS :: Monad m => Source m BS.ByteString -> m BS.ByteString
+sourceToBS s = s $$ myDecode (fromString "")
     where
-      append a s = return $ StateProcessing $ BS.append a s
-      finish = return
+      myDecode a = do
+        res <- await
+        case res of
+          Nothing -> return a
+          Just x -> myDecode (BS.append a x)
 
 failOnError :: Result a -> (a -> b) -> b
 failOnError (Error e) _ = error e

@@ -42,7 +42,7 @@ prefsApp timeSeriesName request = return $ responseLBS status400 [("Content-Type
 queryApp :: State -> HttpPath -> Application
 queryApp st [] request = do
   -- Run query!
-  postData <- sourceToLBS $ requestBody request
+  postData <- sourceToBS $ requestBody request
   liftIO $ ZMQ.withSocket (zmqContext st) ZMQ.Req $ \s -> do
       infoM moduleName $ "Connecting to query broker..."
       let queryText = T.pack $ BS.unpack $ postData

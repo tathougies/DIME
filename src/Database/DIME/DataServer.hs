@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables, BangPatterns #-}
+{-# LANGUAGE ScopedTypeVariables, BangPatterns, ViewPatterns #-}
 module Database.DIME.DataServer
     (
      dataServerMain, dataServerSimpleClient
@@ -13,6 +13,7 @@ import Control.Seq
 
 import qualified Data.ByteString as SB
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Text as T
 import Data.Binary
 import Data.String
 import Data.List
@@ -30,6 +31,7 @@ import Database.DIME.DataServer.Response
 import Database.DIME.Util
 import Database.DIME.Memory.Block
 import Database.DIME.Flow hiding (BlockInfo)
+import Database.DIME.Flow.TimeSeries (isTimeSeries)
 import Database.DIME.Server.State (PeerName(..))
 
 import GHC.Conc (numCapabilities)
@@ -170,11 +172,19 @@ dataServerMain coordinatorName localAddress = do
               let readEntireGraph = do
                     tosAddr <- topOfStack
                     allPoints <- findReachablePoints [tosAddr]
-                    mapM (\addr -> do
-                            val <- readGraph addr
-                            return (addr, val)) allPoints
-              Right (_, graph) <- runGMachine readEntireGraph state
-              return $ QueryResponse graph)
+                    graphData <- mapM (\addr -> do
+                                         val <- readGraph addr
+                                         return (addr, val)) allPoints
+                    return (tosAddr, graphData)
+              Right (_, (retAddr, graph)) <- runGMachine readEntireGraph state
+              let Just retVal = lookup retAddr graph
+              case retVal of
+                _
+                 | isInteger retVal -> return $ QueryResponse $ IntResult $ asInteger retVal
+                 | isString retVal -> return $ QueryResponse $ StringResult $ asString retVal
+                 | isDouble retVal -> return $ QueryResponse $ DoubleResult $ asDouble retVal
+                 | isTimeSeries retVal -> return $ Fail "TODO: serialize time series"
+                 | otherwise -> return $ Fail "Invalid type returned from query")
             (\(e :: SomeException) -> do
                  return $ Fail $ show e)
 

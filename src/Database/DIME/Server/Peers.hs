@@ -184,10 +184,6 @@ instance Binary PeerCommand where
       put tsName
       put columnName
 
-instance Binary ClockTime where
-    put (TOD seconds picoseconds) = put seconds >> put picoseconds
-    get = liftM2 TOD get get
-
 instance Binary PeerResponse where
     get = do
       token <- (get :: Get Int8)
