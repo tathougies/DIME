@@ -21,6 +21,7 @@ import Data.Function
 
 import qualified Database.DIME.Server.Peers as Peers
 import Database.DIME
+import Database.DIME.Transport
 import Database.DIME.Server.State
 import Database.DIME.Flow.Types
 import Database.DIME.Memory.Block (ColumnType(..))
@@ -33,7 +34,6 @@ import Language.Flow.Execution.Types
 import Language.Flow.Execution.GMachine
 import Language.Flow.Builtin
 
-import qualified System.ZMQ3 as ZMQ
 import System.Time
 
 isTimeSeries :: GenericGData -> Bool
@@ -55,12 +55,9 @@ fetchTimeSeries tsc columnName = do
     Nothing -> throwError $ "Cannot find column " ++ show columnName
     Just t -> return t
 
-  liftIO $ ZMQ.withSocket ctxt ZMQ.Req
-         (\s -> do
-            ZMQ.connect s serverName
-            ZMQ.send s [] $ Peers.mkTimeSeriesColumnInfoCommand key (tscName tsc) columnName
-            response <- liftM Peers.parsePeerResponse $ ZMQ.receive s
-            case response of
+  let infoCmd = Peers.TimeSeriesColumnInfo key (tscName tsc) columnName
+  liftIO $ sendRequest ctxt (Connect serverName) infoCmd $
+      (\response -> case response of
               Peers.TimeSeriesColumnInfoResponse {..} ->
                   return $ TimeSeries {
                                tsTableName = tscName tsc,
@@ -130,23 +127,11 @@ mapTS op timeSeriess = do
               PeerName name = head peers
           in error "h"
 
-      transfer s bounds toBlockSpec fromBlockSpec fromPeer = do
+      transfer s bounds toBlockSpec fromBlockSpec fromPeer =
           let transferCmd = TransferBlock toBlockSpec fromBlockSpec fromPeer
-              cmdData = head $ LBS.toChunks $ Bin.encode transferCmd
-          ZMQ.send s [] cmdData
-          reply <- ZMQ.receive s
-          let response = (Bin.decode $ LBS.fromChunks [reply] :: Response)
-          when (isFailure response) $ fail ("Bad response from " ++ show fromPeer ++ ": " ++ show response)
-          return ()
-
-      newBlockReq s blockSpec firstRow endRow dataType = do
-          let newBlkCmd = NewBlock blockSpec firstRow endRow dataType
-              cmdData = head $ LBS.toChunks $ Bin.encode newBlkCmd
-          ZMQ.send s [] cmdData
-          reply <- ZMQ.receive s
-          let response = (Bin.decode $ LBS.fromChunks [reply] :: Response)
-          when (isFailure response) $ fail ("Bad response: " ++ show response)
-          return ()
+          in sendOneRequest s transferCmd $
+             (\(response :: Response) ->
+                  when (isFailure response) $ fail ("Bad response from : " ++ show fromPeer ++ ": " ++ show response))
 
   ctxt <- getZMQContext
 
@@ -180,13 +165,15 @@ mapTS op timeSeriess = do
   -- copy all necessary blocks
   forM_ alignment'' $
     (\(masterBlockSpec, destBlocks, alignment) ->
-       liftIO $ ZMQ.withSocket ctxt ZMQ.Req $ (\s -> do
-         ZMQ.connect s $ lookupPeerName masterBlockSpec
+       liftIO $ safelyWithSocket ctxt Req (Connect $ lookupPeerName masterBlockSpec) $
+       (\s -> do
          forM_ (zip columnTypes destBlocks) $
            (\(columnType, destBlock) ->
                 let minRow = fst $ fst $ head alignment
                     maxRow = snd $ fst $ last alignment
-                in newBlockReq s destBlock minRow maxRow columnType)
+                in sendOneRequest s (NewBlock destBlock minRow maxRow columnType) $
+                   (\(response :: Response) ->
+                        when (isFailure response) $ fail ("Bad repsonse: " ++ show response)))
          forM_ alignment $
            (\(bounds, blockSpecs) ->
                 forM_ (zip destBlocks blockSpecs) $
@@ -197,18 +184,14 @@ mapTS op timeSeriess = do
   -- now issue map operations...
   retTypes <- forM (zip resultBlocks alignment'') $
     (\(resultBlock, (masterBlockSpec, destBlock, ((minRow, _),_):_)) ->
-         liftIO $ ZMQ.withSocket ctxt ZMQ.Req $ (\s -> do
-           ZMQ.connect s $ lookupPeerName masterBlockSpec
-           let (argsInit, argsTail) = splitAt masterTimeSeriesI destBlock
-               blockArgs = argsInit ++ [masterBlockSpec] ++ argsTail
-               mapCmd = Map op blockArgs resultBlock $ lookupRowId masterBlockSpec minRow
-               cmdData = head $ LBS.toChunks $ Bin.encode mapCmd
-           ZMQ.send s [] cmdData
-           reply <- ZMQ.receive s
-           let response = (Bin.decode $ LBS.fromChunks [reply] :: Response)
-           case response of
-             MapResponse retType -> return retType
-             _ -> fail ("Bad response for map " ++ show mapCmd ++ ": " ++ show response)))
+         let (argsInit, argsTail) = splitAt masterTimeSeriesI destBlock
+             blockArgs = argsInit ++ [masterBlockSpec] ++ argsTail
+             mapCmd = Map op blockArgs resultBlock $ lookupRowId masterBlockSpec minRow
+         in liftIO $ sendRequest ctxt (Connect $ lookupPeerName masterBlockSpec) mapCmd $
+                (\(response :: Response) ->
+                     case response of
+                       MapResponse retType -> return retType
+                       _ -> fail ("Bad response for map " ++ show mapCmd ++ ": " ++ show response)))
 
   let typesCheck = all (== (head retTypes)) retTypes
       blockMap = M.fromList $ zipWith (\(blockSpec, _, _) destBlockId -> (destBlockId, BlockInfo [PeerName $ lookupPeerName blockSpec])) alignment'' resultBlockIds

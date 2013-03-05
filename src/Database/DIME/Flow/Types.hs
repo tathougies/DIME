@@ -10,6 +10,7 @@ module Database.DIME.Flow.Types where
     import Data.Int
 
     import Database.DIME
+    import Database.DIME.Transport
     import Database.DIME.Memory.Block (ColumnType(..))
     import Database.DIME.DataServer.Command
     import Database.DIME.Server.State
@@ -17,7 +18,6 @@ module Database.DIME.Flow.Types where
     import Language.Flow.Execution.Types
     import Language.Flow.Execution.GMachine
 
-    import qualified System.ZMQ3 as ZMQ
     import System.Time
 
     data BlockInfo = BlockInfo [PeerName]
@@ -49,11 +49,11 @@ module Database.DIME.Flow.Types where
     data QueryState = QueryState {
                           queryKey :: QueryKey,
                           queryServerName :: String,
-                          queryZMQContext :: ZMQ.Context
+                          queryZMQContext :: Context
                       }
                 deriving Typeable
 
-    getZMQContext :: GMachine ZMQ.Context
+    getZMQContext :: GMachine Context
     getZMQContext = do
       userState <- liftM gmachineUserState get
       let queryState = fromDyn userState (error "Bad state for DIME GMachine") :: QueryState

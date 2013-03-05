@@ -1,13 +1,8 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving, RecordWildCards, TupleSections, RecordWildCards #-}
 module Database.DIME.Server.Peers
-    ( PeerResponse(..),
-      peerServer,
-
-      mkUpdateCommand,
-      mkTimeSeriesInfoCommand,
-      mkTimeSeriesColumnInfoCommand,
-
-      parsePeerResponse
+    ( PeerCommand(..),
+      PeerResponse(..),
+      peerServer
     ) where
 
 import Control.Concurrent.STM
@@ -24,6 +19,7 @@ import Data.String
 import Data.Int
 
 import Database.DIME
+import Database.DIME.Transport
 import Database.DIME.Util
 import Database.DIME.Server.State
 import Database.DIME.Server.Config
@@ -32,7 +28,6 @@ import Database.DIME.Memory.Block (ColumnType(..))
 
 import System.Time
 import System.Log.Logger
-import qualified System.ZMQ3 as ZMQ
 
 import qualified Text.JSON as JSON
 
@@ -63,21 +58,16 @@ data PeerResponse = Ok | InfoRequest |
 peerServer :: State -> IO ()
 peerServer serverState = do
   infoM moduleName "DIME peer server starting"
-  ZMQ.withContext $ \c ->
-      ZMQ.withSocket c ZMQ.Rep $ \s ->
-          do
-            ZMQ.bind s $ "tcp://127.0.0.1:" ++ show coordinatorPort
-            forever $ serve serverState s
+  withContext $ \c ->
+      safelyWithSocket c Rep (Bind $ "tcp://*:" ++ show coordinatorPort) $
+            (forever . serve serverState)
   where
-    serve serverState s = do
-      line <- ZMQ.receive s
-      let cmd = B.decode $ LBS.fromChunks [line]
-      response <- case cmd of
-        UpdateInfo peerName blockCount -> doUpdateInfo peerName blockCount serverState
-        TimeSeriesInfo _ tsName -> doTimeSeriesInfo tsName serverState -- query key ignored for now
-        TimeSeriesColumnInfo _ tsName columnName -> doTimeSeriesColumnInfo tsName columnName serverState
-
-      ZMQ.send s [] $ head $ LBS.toChunks $ B.encode $ response
+    serve serverState s =
+        serveRequest s (return ()) $
+            \cmd -> case cmd of
+                      UpdateInfo peerName blockCount -> doUpdateInfo peerName blockCount serverState
+                      TimeSeriesInfo _ tsName -> doTimeSeriesInfo tsName serverState -- query key ignored for now
+                      TimeSeriesColumnInfo _ tsName columnName -> doTimeSeriesColumnInfo tsName columnName serverState
 
     doUpdateInfo peerName blockCount serverState = do
       peerAdded <- atomically $ do
@@ -145,22 +135,6 @@ peerServer serverState = do
                            dataFrequency = getDataFrequency ts}
 
     calcPeerPriority = getBlockCount -- this is the function you'd change to give a new heuristic to how peers are ranked
-
-parsePeerResponse :: BS.ByteString -> PeerResponse
-parsePeerResponse reply = decode $ LBS.fromChunks [reply]
-
-mkUpdateCommand :: PeerName -> Int -> BS.ByteString
-mkUpdateCommand zmqName blockCount = let updateCmd = UpdateInfo zmqName blockCount
-                                     in head $ LBS.toChunks $ encode updateCmd
-
-mkTimeSeriesInfoCommand :: QueryKey -> TimeSeriesName -> BS.ByteString
-mkTimeSeriesInfoCommand queryKey tsName = let infoCmd = TimeSeriesInfo queryKey tsName
-                                          in head $ LBS.toChunks $ encode infoCmd
-
-mkTimeSeriesColumnInfoCommand :: QueryKey -> TimeSeriesName -> ColumnName -> BS.ByteString
-mkTimeSeriesColumnInfoCommand queryKey tsName columnName =
-    let infoCmd = TimeSeriesColumnInfo queryKey tsName columnName
-    in head $ LBS.toChunks $ encode infoCmd
 
 instance Binary PeerCommand where
     get = do

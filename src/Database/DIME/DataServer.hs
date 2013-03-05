@@ -29,6 +29,7 @@ import Database.DIME.DataServer.Config
 import Database.DIME.DataServer.Command
 import Database.DIME.DataServer.Response
 import Database.DIME.Util
+import Database.DIME.Transport
 import Database.DIME.Memory.Block
 import Database.DIME.Flow hiding (BlockInfo)
 import Database.DIME.Flow.TimeSeries (isTimeSeries)
@@ -40,7 +41,6 @@ import Language.Flow.Compile
 import Language.Flow.Execution.Types
 import Language.Flow.Execution.GMachine
 
-import qualified System.ZMQ3 as ZMQ
 import System.Log.Logger
 import System.Console.Haskeline hiding (throwTo)
 import System.Console.Haskeline.IO
@@ -90,31 +90,25 @@ dataServerMain coordinatorName localAddress = do
   installHandler keyboardSignal (Catch $ termHandler mainThreadId) Nothing
   stateVar <- ServerState.mkEmptyServerState "dime-data"
   infoM moduleName "DIME data loaded..."
-  ZMQ.withContext $ \c -> do
+  withContext $ \c -> do
       forkIO $ statusClient stateVar coordinatorServerName localAddress c
-      ZMQ.withSocket c ZMQ.Rep $ \s -> do
-          ZMQ.bind s $ "tcp://127.0.0.1:" ++ show dataPort
-          ZMQ.connect s coordinatorQueryDealerName -- Connect to coordinators dealer socket
-          forkIO $ untilTerm $ loop s c coordinatorServerName stateVar -- Run the loop with this state.
-          untilTerm $ saveDataPeriodically stateVar
-          dumpData stateVar
-          return ()
+      forkIO $ mainLoop c stateVar coordinatorServerName coordinatorQueryDealerName
+      untilTerm $ saveDataPeriodically stateVar
+      dumpData stateVar
+      return ()
   where
     statusClient stateVar coordinatorName hostName ctxt =
-        ZMQ.withSocket ctxt ZMQ.Req $ \s ->
-            do
-              ZMQ.connect s coordinatorName
-              let zmqName = PeerName $ "tcp://" ++ hostName ++ ":" ++ show dataPort
-              untilTerm $ do
-                   state <- readTVarIO stateVar
-                   let cmdData = Peers.mkUpdateCommand zmqName $ ServerState.getBlockCount state
-                   ZMQ.send s [] cmdData
-                   reply <- ZMQ.receive s
-                   let response = Peers.parsePeerResponse reply
-                   case response of
-                     Peers.InfoRequest -> return ()
-                     _ -> return ()
-                   threadDelay keepAliveTime
+        safelyWithSocket ctxt Req (Connect coordinatorName) $
+          \s -> do
+            let zmqName = PeerName $ "tcp://" ++ hostName ++ ":" ++ show dataPort
+            untilTerm $ do
+                  state <- readTVarIO stateVar
+                  sendOneRequest s (Peers.UpdateInfo zmqName $ ServerState.getBlockCount state) $
+                        (\response ->
+                             case response of
+                               Peers.InfoRequest -> return () -- should do something here
+                               _ -> return ())
+                  threadDelay keepAliveTime
 
     dumpData stateVar = ServerState.dumpState stateVar
 
@@ -125,19 +119,22 @@ dataServerMain coordinatorName localAddress = do
       threadDelay dumpDataPeriod
       dumpData stateVar
 
+    mainLoop c stateVar coordinatorServerName coordinatorQueryDealerName =
+        safelyWithSocket c Rep (ConnectBind coordinatorQueryDealerName ("tcp://127.0.0.1:" ++ show dataPort)) $
+               \s -> untilTerm $ loop s c coordinatorServerName stateVar -- Run the loop with this state.
+
     expandRowIds regions = concatMap (\(x, y) -> [x..(y - RowID 1)]) regions
 
-    loop s c coordinatorName stateVar = do
-      line <- ZMQ.receive s
-      let cmd :: Command
-          cmd = decode $ LBS.fromChunks [line]
-      infoM moduleName $ "Received " ++ show cmd
-      response <- case cmd of
-        RunQuery key txt -> doRunQuery c coordinatorName key txt -- this runs in the IO monad, non-atomically
-        _ -> do
-          (response, state') <- atomically $ do
-              state <- readTVar stateVar
-              (response, !newState) <- case cmd of -- Parse the command
+    loop s c coordinatorName stateVar =
+      serveRequest s (return ()) $
+         \(cmd ::Command) -> do
+            infoM moduleName $ "Received " ++ show cmd
+            case cmd of
+              RunQuery key txt -> doRunQuery c coordinatorName key txt -- this runs in the IO monad, non-atomically
+              _ -> do
+                (response, state') <- atomically $ do
+                    state <- readTVar stateVar
+                    (response, !newState) <- case cmd of -- Parse the command
                                 FetchRows tableId rowIds columnIds ->
                                     doFetchRows tableId (expandRowIds rowIds) columnIds state
                                 UpdateRows tableId rowIds columnIds values ->
@@ -151,15 +148,13 @@ dataServerMain coordinatorName localAddress = do
                                     doBlockInfo blockSpec state
                                 Map op inputs output firstRow ->
                                     doMap op inputs output firstRow state
-              case newState of
-                Just state' -> do
-                  writeTVar stateVar state'
-                  return (response, state')
-                Nothing -> return (response, state)
-          E.evaluate (state' `using` rseq)
-          return response
-      ZMQ.send s [] $ head $ LBS.toChunks $ encode response
-      return ()
+                    case newState of
+                      Just state' -> do
+                          writeTVar stateVar state'
+                          return (response, state')
+                      Nothing -> return (response, state)
+                E.evaluate (state' `using` rseq)
+                return response
 
     defaultProgramCellCount = 4096
 
@@ -266,10 +261,9 @@ dataServerSimpleClient :: IO ()
 dataServerSimpleClient = do
   hd <- initializeInput defaultSettings -- Initialize haskeline
   infoM moduleName "Welcome to DIME data server debug client..."
-  ZMQ.withContext $ \c ->
-      ZMQ.withSocket c ZMQ.Req $ \s -> do
-          ZMQ.connect s "tcp://127.0.0.1:8008"
-          forever $ loop s hd
+  withContext $ \c ->
+      safelyWithSocket c Req (Connect "tcp://127.0.0.1:8008") $
+          \s -> forever $ loop s hd
     where
       loop s hd = do
         line <- queryInput hd (getInputLine "% ")
@@ -280,12 +274,8 @@ dataServerSimpleClient = do
                 Nothing -> putStrLn $ "Could not parse request"
                 Just (cmd :: Command) -> do
                              putStrLn $ "Sending command"
-                             let cmdData = head $ LBS.toChunks $ encode cmd
                              startTime <- getClockTime
-                             ZMQ.send s [] cmdData
-                             reply <- ZMQ.receive s
+                             sendOneRequest s cmd (putStrLn . show :: Response -> IO ())
                              endTime <- getClockTime
-                             let response = (decode $ LBS.fromChunks [reply] :: Response)
-                                 timeTaken = endTime `diffClockTimes` startTime
-                             putStrLn $ show response
+                             let timeTaken = endTime `diffClockTimes` startTime
                              putStrLn $ "Query took " ++ (show $ tdMin timeTaken) ++ " m, " ++ (show $ tdSec timeTaken) ++ "s, " ++ (show $ (tdPicosec timeTaken) `div` 1000000000) ++ "ms."

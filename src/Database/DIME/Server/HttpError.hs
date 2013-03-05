@@ -8,8 +8,8 @@ import Control.Monad.IO.Class
 import Network.Wai
 import Network.HTTP.Types
 
-import Data.ByteString.Lazy.Char8 ()
-import qualified Data.ByteString.Lazy as LBS
+--import Data.ByteString.Lazy.Char8 ()
+import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Text
 
 notFound :: MonadIO m => m Response
@@ -25,4 +25,4 @@ internalServerError :: MonadIO m => m Response
 internalServerError = liftIO $ return $ responseLBS status500 [("Content-Type", "text/plain")] "Internal Server Error"
 
 ok :: MonadIO m => ResponseHeaders -> LBS.ByteString -> m Response
-ok headers lbs = return $ responseLBS status200 headers lbs
+ok headers lbs = return $ responseLBS status200 headers (LBS.append lbs (LBS.pack "\n"))

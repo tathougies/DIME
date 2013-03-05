@@ -14,6 +14,7 @@ module Database.DIME.Flow.Builtin where
 
     import qualified Database.DIME.Server.Peers as Peers
     import Database.DIME
+    import Database.DIME.Transport
     import Database.DIME.Server.State
     import Database.DIME.Flow.Types
     import Database.DIME.Flow.TimeSeries
@@ -24,7 +25,6 @@ module Database.DIME.Flow.Builtin where
     import Language.Flow.Execution.GMachine
     import Language.Flow.Builtin
 
-    import qualified System.ZMQ3 as ZMQ
     import System.Time
 
     dimeBuiltin :: Module
@@ -63,27 +63,24 @@ module Database.DIME.Flow.Builtin where
       let key = queryKey userState
           ctxt = queryZMQContext userState
           serverName = queryServerName userState
+          infoCmd = Peers.TimeSeriesInfo key tsName
 
-      liftIO $ ZMQ.withSocket ctxt ZMQ.Req
-         (\s -> do
-            ZMQ.connect s serverName
-            ZMQ.send s [] $ Peers.mkTimeSeriesInfoCommand key tsName
-            reply <- ZMQ.receive s
-            let response = Peers.parsePeerResponse reply
-            case response of
-              Peers.TimeSeriesInfoResponse {..} -> do
-                  liftIO $ putStrLn $ "columns " ++ show columnNamesAndTypes
-                  return $ TimeSeriesCollection {
-                               tscName = tableName,
-                               tscTableId = tableId,
-                               tscLength = tableLength,
-                               tscStartTime = startTime,
-                               tscFrequency = dataFrequency,
-                               tscColumns = columnNamesAndTypes
-                             }
-              Peers.ObjectNotFound -> let TimeSeriesName txt = tsName
-                                      in error $ "Could not find time series " ++ unpack txt
-              _ -> error $ "Invalid response from " ++ serverName)
+      liftIO $ sendRequest ctxt (Connect serverName) infoCmd $
+             (\response ->
+                  case response of
+                    Peers.TimeSeriesInfoResponse {..} -> do
+                        liftIO $ putStrLn $ "columns " ++ show columnNamesAndTypes
+                        return $ TimeSeriesCollection {
+                                     tscName = tableName,
+                                     tscTableId = tableId,
+                                     tscLength = tableLength,
+                                     tscStartTime = startTime,
+                                     tscFrequency = dataFrequency,
+                                     tscColumns = columnNamesAndTypes
+                                   }
+                    Peers.ObjectNotFound -> let TimeSeriesName txt = tsName
+                                            in error $ "Could not find time series " ++ unpack txt
+                    _ -> error $ "Invalid response from " ++ serverName)
 
     isTimeSeriesCollection :: GenericGData -> Bool
     isTimeSeriesCollection = checkType (typeName (undefined :: TimeSeriesCollection))

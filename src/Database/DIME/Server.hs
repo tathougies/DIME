@@ -19,6 +19,7 @@ import Database.DIME.Server.HttpError
 import Database.DIME.Server.State
 import Database.DIME.Server.Peers
 import Database.DIME.Server.Config
+import Database.DIME.Transport
 import Database.DIME.DataServer.Command as DataCommand
 import Database.DIME.DataServer.Response as DataResponse
 import Database.DIME.Util
@@ -27,7 +28,6 @@ import Network.Wai
 import Network.HTTP.Types
 import Network.Wai.Handler.Warp (run)
 
-import qualified System.ZMQ3 as ZMQ
 import System.Log.Logger
 
 type HttpPath = [T.Text]
@@ -43,17 +43,16 @@ queryApp :: State -> HttpPath -> Application
 queryApp st [] request = do
   -- Run query!
   postData <- sourceToBS $ requestBody request
-  liftIO $ ZMQ.withSocket (zmqContext st) ZMQ.Req $ \s -> do
-      infoM moduleName $ "Connecting to query broker..."
-      let queryText = T.pack $ BS.unpack $ postData
-          queryRequest = BS.concat $ LBS.toChunks $ Bin.encode $ RunQuery (QueryKey 0) queryText
-      ZMQ.connect s "inproc://queries"
-      ZMQ.send s [] $ queryRequest
-      reply <- ZMQ.receive s
-      let response = (Bin.decode $ LBS.fromChunks [reply] :: DataResponse.Response)
-      case response of
-        QueryResponse dat -> ok [] $ LBS.pack $ show dat
-        _ -> internalServerError
+
+  let queryText = T.pack $ BS.unpack $ postData
+      queryCmd = RunQuery (QueryKey 0) queryText
+
+  liftIO $ sendRequest (zmqContext st) (Connect "inproc://queries") queryCmd $
+      \response ->
+        case response of
+          QueryResponse dat -> ok [] $ LBS.pack $ show dat
+          _ -> internalServerError
+
 queryApp _ _ _ = badRequest -- shouldn't have any more path components
 
 webServerApp :: State -> Application
@@ -76,19 +75,12 @@ dumpStatePeriodically state = forever $ do
                                 threadDelay dumpDelay
                                 rebuildTimeSeriesMap state
 
-queryDistributor :: ZMQ.Context -> IO () -- receives query requests and forwards them on to some node to handle them
+queryDistributor :: Context -> IO () -- receives query requests and forwards them on to some node to handle them
 queryDistributor c = do
   infoM moduleName $ "Query broker starting..."
-  ZMQ.withSocket c ZMQ.Router $ \routerS -> do
-      ZMQ.bind routerS "inproc://queries"
-      ZMQ.withSocket c ZMQ.Dealer $ \dealerS -> do
-          ZMQ.bind dealerS $ "tcp://*:" ++ show queryBrokerPort
-          forever $ do
-            forkIO $ do
-                      parts <- ZMQ.receiveMulti dealerS
-                      ZMQ.sendMulti routerS parts
-            parts <- ZMQ.receiveMulti routerS
-            ZMQ.sendMulti dealerS parts
+  safelyWithSocket c Router (Bind "inproc://queries") $ \routerS ->
+      safelyWithSocket c Dealer (Bind $ "tcp://*:" ++ show queryBrokerPort) $ \dealerS ->
+          proxy routerS dealerS
 
 serverMain :: IO ()
 serverMain = do

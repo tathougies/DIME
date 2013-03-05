@@ -39,11 +39,9 @@ import Database.DIME.Util
 import Database.DIME.Server.Util
 import Database.DIME.DataServer.Response hiding (Ok)
 import Database.DIME.DataServer.Command
+import Database.DIME.Transport
 import Database.DIME
 
-import GHC.Conc
-
-import qualified System.ZMQ3 as ZMQ
 import System.Time
 import System.Directory
 import System.Log.Logger
@@ -107,7 +105,7 @@ data State = ServerState {
       configLocation :: FilePath,
       timeSeriessRef :: TVar (Map.Map TimeSeriesName TimeSeries),
       peersRef :: TVar PeersInfo,
-      zmqContext :: ZMQ.Context
+      zmqContext :: Context
     }
 
 calcMeanBlockCount :: Floating a => PeersInfo -> IO a
@@ -140,7 +138,7 @@ newServerState :: FilePath -> IO State
 newServerState configLocation = do
   timeSeriessTVar <- newTVarIO Map.empty
   peersTVar <- newTVarIO $ PeersInfo Map.empty PSQ.empty
-  ctxt <- ZMQ.init $ fromIntegral numCapabilities
+  ctxt <- initTransport
   let baseState = ServerState configLocation timeSeriessTVar peersTVar ctxt
   readStateFromConfigFile baseState
 
@@ -396,16 +394,9 @@ appendRow timeSeriesName columnsAndValues state =
             -- Now send a message out to each owner adding the value
             results <- forM (getOwners blockData)
                   (\(PeerName peer) ->
-                       ZMQ.withSocket context ZMQ.Req
-                            (\s -> do
-                                 ZMQ.connect s peer
-                                 let appendCmd = UpdateRows tableId [RowID $ fromIntegral rowIndex] [columnId] [[columnValue]]
-                                     cmdData = head $ LBS.toChunks $ Bin.encode appendCmd
-                                 ZMQ.send s [] cmdData
-                                 reply <- ZMQ.receive s
-                                 let response = (Bin.decode $ LBS.fromChunks [reply] :: Response)
-                                 return $ not $ isFailure response
-                            )
+                       let appendCmd = UpdateRows tableId [RowID $ fromIntegral rowIndex] [columnId] [[columnValue]]
+                       in sendRequest context (Connect peer) appendCmd $
+                          (return . not . isFailure)
                   )
 
             if (all id results)
@@ -418,21 +409,16 @@ appendRow timeSeriesName columnsAndValues state =
              else putMVar signalVar False -- failure :(
             return ()
 
-      createBlockOnPeer :: ZMQ.Context -> PeerName -> TableID -> ColumnID -> BlockID -> Int64 -> B.ColumnType -> IO (Int64, Int64)
+      createBlockOnPeer :: Context -> PeerName -> TableID -> ColumnID -> BlockID -> Int64 -> B.ColumnType -> IO (Int64, Int64)
       createBlockOnPeer ctxt (PeerName peer) tableId columnId blockId rowId columnType =
-        ZMQ.withSocket ctxt ZMQ.Req
-           (\s -> do
-              ZMQ.connect s peer
-              let beginRowId = RowID $ rowId - rowId `mod` blockSize
-                  endRowId = beginRowId + (RowID blockSize)
-                  newBlockCommand = NewBlock (BlockSpec tableId columnId blockId) beginRowId endRowId columnType
-                  cmdData = head $ LBS.toChunks $ Bin.encode newBlockCommand
-              ZMQ.send s [] cmdData
-              reply <- ZMQ.receive s
-              let response = (Bin.decode $ LBS.fromChunks [reply] :: Response)
-              when (isFailure response) $
-                   warningM moduleName $ "Failed creating block " ++ show blockId ++ " on " ++ peer
-              return (fromIntegral beginRowId, fromIntegral endRowId))
+          let beginRowId = RowID $ rowId - rowId `mod` blockSize
+              endRowId = beginRowId + (RowID blockSize)
+              newBlockCommand = NewBlock (BlockSpec tableId columnId blockId) beginRowId endRowId columnType
+          in sendRequest ctxt (Connect peer) newBlockCommand $
+             (\(response :: Response) -> do
+                  when (isFailure response) $
+                       warningM moduleName ("Failed creating block " ++ show blockId ++ " on " ++ peer)
+                  return (fromIntegral beginRowId, fromIntegral endRowId))
 
       calculateBestPeer :: State -> ColumnData -> IO (Maybe PeerName)
       calculateBestPeer state columnData = do
