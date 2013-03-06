@@ -57,21 +57,27 @@ elems (Tree _ _ (Just v) leftChild rightChild) = (elems leftChild) ++ [v] ++ (el
 assocs :: (Ord k, Eq v) => DisjointIntervalTree k v -> [((k, k), v)]
 assocs Tip = []
 assocs (Tree _ _ _ Tip Tip) = []
-assocs (Tree ourKey _ _ leftChild Tip) = (assocs leftChild) ++
-                                         case value leftChild of
-                                           Nothing -> []
-                                           Just x -> [((key leftChild, ourKey), x)]
-assocs (Tree ourKey _ _ Tip rightChild) = (case value rightChild of
-                                             Nothing -> []
-                                             Just x -> [((ourKey, key rightChild), x)]) ++ assocs rightChild
-assocs (Tree ourKey _ v leftChild rightChild) = (assocs leftChild) ++
-                                                (case value leftChild of
-                                                   Nothing -> []
-                                                   Just x -> [((key leftChild, ourKey), x)]) ++
-                                                (case v of
-                                                   Nothing -> []
-                                                   Just x -> [((ourKey, key rightChild), x)]) ++
-                                                (assocs rightChild)
+assocs (Tree ourKey _ _ leftChild Tip) =
+    let leftMax = maxNode leftChild
+    in (assocs leftChild) ++
+       case value leftMax of -- this is an empty region
+         Nothing -> []
+         Just x -> [((key leftMax, ourKey), x)]
+assocs (Tree ourKey _ Nothing Tip rightChild) = assocs rightChild -- we start an empty region
+assocs (Tree ourKey _ (Just x) Tip rightChild) =
+    let rightMin = minNode rightChild
+    in [((ourKey, key rightMin), x)] ++ assocs rightChild
+assocs (Tree ourKey _ v leftChild rightChild) =
+    let leftMax = maxNode leftChild
+        rightMin = minNode rightChild
+    in (assocs leftChild) ++
+           (case value leftMax of
+              Nothing -> []
+              Just x -> [((key leftMax, ourKey), x)]) ++
+           (case v of
+              Nothing -> []
+              Just x -> [((ourKey, key rightMin), x)]) ++
+           (assocs rightChild)
 
 foldr :: (Ord k, Eq v) => (k -> Maybe v -> b -> b) -> b -> DisjointIntervalTree k v -> b
 foldr _ z Tip = z
@@ -266,6 +272,24 @@ prop_validStructure tree = valid tree
 
 prop_testDeletion :: DisjointIntervalTree Int String -> Int -> Bool
 prop_testDeletion tree elem = (lookup elem $ delete (elem, elem + 1) tree) == Nothing
+
+prop_testAssocs :: Integer -> [Positive Integer] -> [Maybe Int] -> Bool
+prop_testAssocs base offsets values =
+    let lowerBounds = scanl (+) base (P.map (\(Positive x) -> x) offsets)
+        bounds = zip lowerBounds (tail lowerBounds)
+        ourAssocs = zip bounds values
+
+        valuedAssocs' = P.filter (\(bounds, m) -> case m of
+                                                 Just _ -> True
+                                                 Nothing -> False) ourAssocs
+        valuedAssocs = P.map (\(bounds, Just x) -> (bounds, x)) valuedAssocs'
+        dit = fromList valuedAssocs
+
+        calcExpAssocs (((s1, e1), x1):((s2, e2),x2):xs)
+            | e1 == s2 && x1 == x2 = calcExpAssocs (((s1, e2), x1):xs)
+        calcExpAssocs (x:xs) = x:(calcExpAssocs xs)
+        calcExpAssocs [] = []
+    in ((assocs dit) == valuedAssocs)
 
 runAllTests = $quickCheckAll
 
