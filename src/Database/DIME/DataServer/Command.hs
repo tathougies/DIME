@@ -1,3 +1,4 @@
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module Database.DIME.DataServer.Command
     ( Command(..),
       QueryKey(..)

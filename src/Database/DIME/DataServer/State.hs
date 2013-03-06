@@ -114,12 +114,11 @@ restoreStateFromChunks state = do
   forM allColumns $
        (\columnSpec -> do
           columnData <- readFile $ columnFileName chunkDir columnSpec
-
+          putStrLn $ "Loading " ++ show columnSpec
           let (tableId, columnId, rowMappings) = case JSON.decode columnData of
                   Ok (JSObject columnDict) -> parseColumn columnDict
                   Ok x -> error $ "Couldn't read column " ++ show columnSpec ++ ": bad type"
                   Error e -> error $ "Couldn't read column " ++ show columnSpec ++ ": " ++ e
-
           modifyIORef stateRef $
               (\st -> let columnsForTable = maybe S.empty id $ M.lookup tableId $ getTables st
                           columnsForTable' = S.insert columnId columnsForTable
@@ -435,7 +434,7 @@ dumpState stateVar = do
             writeFile fileName serializedJSON)
 
   forM updatedColumns $ -- write out updated columns
-       (\(updatedColumnSpec@(columnId, tableId), rowMappings) -> do
+       (\(updatedColumnSpec@(tableId, columnId), rowMappings) -> do
             let fileName = columnFileName chunkDir updatedColumnSpec -- output correct JSON data structure
                 jsonData = showJSON $ toJSObject [
                             ("columnId", showJSON $ columnId),

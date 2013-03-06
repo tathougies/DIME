@@ -1,4 +1,4 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, ScopedTypeVariables #-}
 module Database.DIME.Server.State
     ( State(..), TimeSeriesName (..), ColumnName (..),
       TimeSeriesData(..), ColumnData(..), PeerName(..),
@@ -33,6 +33,8 @@ import Data.String
 import Data.Ratio
 import Data.List
 import Data.Ord
+
+import Debug.Trace
 
 import qualified Database.DIME.Memory.Block as B
 import Database.DIME.Util
@@ -183,15 +185,17 @@ newServerState configLocation = do
                       readJSON startTimeD, readJSON dataFrequencyD) of
                   (Ok name, Ok tableId, Ok length, Ok (JSObject columns), Ok startTime, Ok dataFrequency) ->
                       do
-                        columnsData <- mapMaybeM
+                        columnsData <- mapM
                                            (\(name, column) -> do
                                               let columnData = readJSON column :: Result ColumnData
                                               case columnData of
-                                                Error _ -> return Nothing
+                                                Error e -> do
+                                                  errorM moduleName $ "Error reading columns: " ++ e
+                                                  fail "Error reading column"
                                                 Ok columnData ->
                                                     do
                                                       var <- atomically $ newTVar $ columnData
-                                                      return $ Just (ColumnName $ fromString name, var)) $ fromJSObject columns
+                                                      return $ (ColumnName $ fromString name, var)) $ fromJSObject columns
                         let columnsMap = Map.fromList columnsData
                         return $ Ok $ TimeSeriesData name tableId length columnsMap startTime dataFrequency
                   _ -> return $ Error "Bad data types for TimeSeriesData"
@@ -389,7 +393,9 @@ appendRow timeSeriesName columnsAndValues state =
                                                          })
 
                                                 return (newBlockId, newBlockData)
-                               Nothing -> fail "Could not find peer to place block on"
+                               Nothing -> do
+                                        putMVar signalVar False
+                                        fail "Could not find peer to place block on"
             infoM moduleName $ "Will put in " ++ show blockId ++ " on peers " ++ show blockData
             -- Now send a message out to each owner adding the value
             results <- forM (getOwners blockData)
@@ -398,7 +404,6 @@ appendRow timeSeriesName columnsAndValues state =
                        in sendRequest context (Connect peer) appendCmd $
                           (return . not . isFailure)
                   )
-
             if (all id results)
              then do
                -- The addition was successful, we update the column correspondingly
@@ -520,22 +525,21 @@ instance JSON BlockData where
     readJSON a = case readJSON a of
                    Error x -> Error $ "Invalid JSON" ++ x
                    Ok assoc ->
-                       case lookup "blocks" assoc of
+                       case lookup "peers" (fromJSObject assoc) of
                          Nothing -> Error "Invalid structure for BlockData object"
-                         Just peerData -> let peerJson = readJSON peerData
-                                              parsePeers [] = []
-                                              parsePeers (x:xs) = case readJSON x of
-                                                                    Error _ -> parsePeers xs
-                                                                    Ok a -> a : parsePeers xs
-                                          in case peerJson of
-                                               Error e -> Error e
-                                               Ok peerJsonVal -> Ok $ BlockData $ parsePeers peerJsonVal
+                         Just (JSArray peerData) ->
+                             let parsePeers [] = []
+                                 parsePeers (x:xs) = case readJSON x of
+                                                       Error _ -> parsePeers xs
+                                                       Ok a -> a : parsePeers xs
+                             in Ok $ BlockData $ parsePeers peerData
+                         Just _ -> Error "Could not read array"
 
 instance (Ord k, Eq v, JSON k, JSON v) => JSON (DIT.DisjointIntervalTree k v) where
     showJSON = showJSON . DIT.assocs
     readJSON assocs = case readJSON assocs of
-                        Error e -> Error e
-                        Ok assocList -> Ok $ foldr (uncurry DIT.insert) DIT.empty assocList
+                        Error e -> trace e $ Error e
+                        Ok assocList -> Ok $ DIT.fromList assocList -- foldr (uncurry DIT.insert) DIT.empty assocList
 
 instance JSON ColumnData where
     showJSON x = showJSON $ toJSObject [
@@ -550,24 +554,16 @@ instance JSON ColumnData where
         let objData = fromJSObject objData'
             l fieldName = lookup fieldName objData -- some shorthand
         in
-          case (l "name", l "columnId", l "blocks", l "type", l "ranges", l "allocatedBlocks") of
-            (Just nameD, Just columnIdD, Just blocksD, Just typeD, Just blockRangesD,
-             Just allocatedBlocksD) ->
+          case (l "name", l "columnId", l "blocks", l "type", l "allocatedBlocks", l "ranges") of
+            (Just nameD, Just columnIdD, Just blocksD, Just typeD, Just allocatedBlocksD,
+             Just blockRangesD) ->
                 case (readJSON nameD, readJSON columnIdD, readJSON blocksD, readJSON typeD,
-                      readJSON blockRangesD, readJSON allocatedBlocksD) of
-                  (Ok name, Ok columnId, Ok blocks, Ok columnType, Ok blockRanges, Ok allocatedBlocks) ->
+                      readJSON allocatedBlocksD, readJSON blockRangesD) of
+                  (Ok name, Ok columnId, Ok blocks, Ok columnType, Ok allocatedBlocks, Ok blockRanges) ->
                       Ok $ ColumnData name columnId columnType blocks allocatedBlocks blockRanges
                   _ -> Error "Bad types for ColumnData"
             _ -> Error "Bad object structure for ColumnData"
     readJSON _ = Error "Bad format for ColumnData"
-
--- instance JSON LocalTime where
---     showJSON x = JSString $ toJSString $ formatTime defaultTimeLocale rfc822DateFormat x
---     readJSON (JSString s) = let stringValue = fromJSString s
---                             in case parseTime defaultTimeLocale rfc822DateFormat stringValue of
---                                  Nothing -> Error "Bad date format for local time"
---                                  Just x -> Ok x
---     readJSON _ = Error "Bad type for LocalTime encoded as JSON, expected string"
 
 instance JSON a => JSON (V.Vector a) where
     showJSON = showJSON.(V.toList)

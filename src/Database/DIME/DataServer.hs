@@ -48,6 +48,7 @@ import System.IO
 import System.Time
 import System.IO.Unsafe
 import System.Posix.Signals
+import System.Exit
 
 -- For module use only
 moduleName = "Database.DIME.DataServer"
@@ -63,9 +64,12 @@ dumpDataPeriod = 5000000 -- one minute
 termSignalReceived :: IORef Bool
 termSignalReceived = unsafePerformIO $ newIORef False
 
+threadsRef :: IORef [ThreadId]
+threadsRef = unsafePerformIO $ newIORef []
+
 untilTerm :: IO () -> IO ()
 untilTerm action = do
-  action
+  E.catch action (\(e :: SigTermReceived) -> return ())
   status <- readIORef termSignalReceived
   if status then
       do
@@ -73,10 +77,11 @@ untilTerm action = do
         return ()
    else untilTerm action
 
-termHandler :: ThreadId -> IO ()
-termHandler mainThreadId = do
+termHandler :: IO ()
+termHandler = do
   putStrLn "Term received"
-  throwTo mainThreadId SigTermReceived
+  threads <- readIORef threadsRef
+  forM threads (\threadId -> throwTo threadId SigTermReceived)
   writeIORef termSignalReceived True
 
 dataServerMain :: String -> String -> IO ()
@@ -86,15 +91,19 @@ dataServerMain coordinatorName localAddress = do
   infoM moduleName "DIME Data server starting up..."
   initFlowEngine
   mainThreadId <- myThreadId
-  installHandler softwareTermination (Catch $ termHandler mainThreadId) Nothing
-  installHandler keyboardSignal (Catch $ termHandler mainThreadId) Nothing
+  modifyIORef threadsRef (mainThreadId:)
+  installHandler softwareTermination (CatchOnce termHandler) Nothing
+  installHandler keyboardSignal (CatchOnce termHandler) Nothing
   stateVar <- ServerState.mkEmptyServerState "dime-data"
   infoM moduleName "DIME data loaded..."
   withContext $ \c -> do
-      forkIO $ statusClient stateVar coordinatorServerName localAddress c
-      forkIO $ mainLoop c stateVar coordinatorServerName coordinatorQueryDealerName
+      mainLoopId <- forkIO $ statusClient stateVar coordinatorServerName localAddress c
+      statusId <- forkIO $ mainLoop c stateVar coordinatorServerName coordinatorQueryDealerName
+      modifyIORef threadsRef (++ [statusId, mainLoopId])
       untilTerm $ saveDataPeriodically stateVar
+      putStrLn "Going to dump data..."
       dumpData stateVar
+      exitWith ExitSuccess
       return ()
   where
     statusClient stateVar coordinatorName hostName ctxt =
@@ -112,10 +121,7 @@ dataServerMain coordinatorName localAddress = do
 
     dumpData stateVar = ServerState.dumpState stateVar
 
-    saveDataPeriodically stateVar = E.catch (saveDataPeriodically' stateVar) $
-                                    (\(e :: SigTermReceived) -> return ())
-
-    saveDataPeriodically' stateVar = do
+    saveDataPeriodically stateVar = do
       threadDelay dumpDataPeriod
       dumpData stateVar
 

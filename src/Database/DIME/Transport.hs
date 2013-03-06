@@ -1,3 +1,4 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 module Database.DIME.Transport
     (EndPoint(..),
      ZMQ.SocketType,

@@ -65,8 +65,7 @@ webServerApp state req = let path = normalizedPath $ pathInfo req
 
 webServerMain :: State -> IO ()
 webServerMain state = do
-  infoM moduleName "DIME server starting..."
-  debugM moduleName "Welcome to DIME web server debug client"
+  infoM moduleName "DIME server starting (debug mode on) ..."
 
   run webPort (webServerApp state)
 
