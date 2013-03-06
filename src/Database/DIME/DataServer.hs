@@ -32,7 +32,7 @@ import Database.DIME.Util
 import Database.DIME.Transport
 import Database.DIME.Memory.Block
 import Database.DIME.Flow hiding (BlockInfo)
-import Database.DIME.Flow.TimeSeries (isTimeSeries)
+import Database.DIME.Flow.TimeSeries (isTimeSeries, asTimeSeries, readTimeSeries)
 import Database.DIME.Server.State (PeerName(..))
 
 import GHC.Conc (numCapabilities)
@@ -97,9 +97,16 @@ dataServerMain coordinatorName localAddress = do
   stateVar <- ServerState.mkEmptyServerState "dime-data"
   infoM moduleName "DIME data loaded..."
   withContext $ \c -> do
-      mainLoopId <- forkIO $ statusClient stateVar coordinatorServerName localAddress c
-      statusId <- forkIO $ mainLoop c stateVar coordinatorServerName coordinatorQueryDealerName
-      modifyIORef threadsRef (++ [statusId, mainLoopId])
+      statusId <- forkIO $ statusClient stateVar coordinatorServerName localAddress c
+      distributorId <- forkIO $ requestDistributor c coordinatorQueryDealerName
+      modifyIORef threadsRef (++ [statusId, distributorId])
+
+      let launchMainLoop = do
+                        loopId <- forkIO $ mainLoop c stateVar coordinatorServerName coordinatorQueryDealerName
+                        modifyIORef threadsRef (loopId:)
+
+      replicateM 3 $ launchMainLoop
+
       untilTerm $ saveDataPeriodically stateVar
       putStrLn "Going to dump data..."
       dumpData stateVar
@@ -125,8 +132,28 @@ dataServerMain coordinatorName localAddress = do
       threadDelay dumpDataPeriod
       dumpData stateVar
 
+    queryObserver c queryDealerName =
+      safelyWithSocket c Router (Connect queryDealerName) $ \queryReceiverS ->
+          safelyWithSocket c Dealer (Connect "inproc://requests-in") $ \dealerS -> do
+              forkIO $ untilTerm $ (tunnel dealerS queryReceiverS >> putStrLn "sending retval")
+              untilTerm $ tunnel queryReceiverS dealerS
+
+    requestObserver c =
+        safelyWithSocket c Router (Bind ("tcp://127.0.0.1:" ++ show dataPort)) $ \routerS ->
+            safelyWithSocket c Dealer (Connect "inproc://requests-in") $ \dealerS -> do
+                forkIO $ untilTerm $ (tunnel dealerS routerS >> putStrLn "sending reply")
+                untilTerm $ tunnel routerS dealerS
+
+    requestDistributor c queryDealerName = do
+      forkIO $ queryObserver c queryDealerName
+      forkIO $ requestObserver c
+      safelyWithSocket c Router (Bind "inproc://requests-in") $ \routerS ->
+          safelyWithSocket c Dealer (Bind "inproc://requests") $ \dealerS -> do
+              forkIO $ untilTerm $ (tunnel routerS dealerS >> putStrLn "Got something back!")
+              untilTerm $ tunnel dealerS routerS
+
     mainLoop c stateVar coordinatorServerName coordinatorQueryDealerName =
-        safelyWithSocket c Rep (ConnectBind coordinatorQueryDealerName ("tcp://127.0.0.1:" ++ show dataPort)) $
+        safelyWithSocket c Rep (Connect "inproc://requests") $
                \s -> untilTerm $ loop s c coordinatorServerName stateVar -- Run the loop with this state.
 
     expandRowIds regions = concatMap (\(x, y) -> [x..(y - RowID 1)]) regions
@@ -184,10 +211,14 @@ dataServerMain coordinatorName localAddress = do
                  | isInteger retVal -> return $ QueryResponse $ IntResult $ asInteger retVal
                  | isString retVal -> return $ QueryResponse $ StringResult $ asString retVal
                  | isDouble retVal -> return $ QueryResponse $ DoubleResult $ asDouble retVal
-                 | isTimeSeries retVal -> return $ Fail "TODO: serialize time series"
+                 | isTimeSeries retVal -> do
+                            Right (_, tsData) <- runGMachine (readTimeSeries $ asTimeSeries retVal) state
+                            putStrLn $ "Got " ++ show tsData
+                            return $ QueryResponse $ TimeSeriesResult tsData
                  | otherwise -> return $ Fail "Invalid type returned from query")
             (\(e :: SomeException) -> do
-                 return $ Fail $ show e)
+               putStrLn $ "Exc: " ++ show e
+               return $ Fail $ show e)
 
     doFetchRows tableId rowIds columnIds state =
         let values = map fetchRow rowIds

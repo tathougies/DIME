@@ -1,17 +1,17 @@
 module Main where
 
+import Control.Monad
+
 import Database.DIME.DataServer
 import Database.DIME.DataServer.Config
 import Database.DIME.Util
+
+import Network.BSD
 
 import System.Exit
 import System.Environment
 import System.Console.GetOpt
 import System.IO
-
-import Control.Monad
-
-import Network.BSD
 
 data Options = Options {
       optDebug :: Bool,

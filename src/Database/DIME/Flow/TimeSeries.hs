@@ -24,7 +24,7 @@ import Database.DIME
 import Database.DIME.Transport
 import Database.DIME.Server.State
 import Database.DIME.Flow.Types
-import Database.DIME.Memory.Block (ColumnType(..))
+import Database.DIME.Memory.Block (ColumnType(..), ColumnValue)
 import Database.DIME.Memory.Operation
 import Database.DIME.DataServer.Command hiding (BlockInfo)
 import Database.DIME.DataServer.Response
@@ -230,6 +230,45 @@ alignBlocks = alignBlocks'
         in liftAssocs blockSpecAssocs
       liftAssocs = map (\(bounds, a) -> (bounds, [a]))
       mergeAlignmentResult = map (\(bounds, x, y) -> (bounds, x ++ y))
+
+readTimeSeries :: TimeSeries -> GMachine [(ClockTime, ColumnValue)]
+readTimeSeries ts = do
+  let assocs = DIT.assocs $ tsRowMappings ts
+
+      lookupBlockData blockId = let Just blockInfo = M.lookup blockId $ tsBlocks ts
+                                in blockInfo
+
+      -- assocsByBlock has the structure [(BlockID, [Bounds])]
+      assocsByBlock = map (\blockAssocs -> (snd $ head blockAssocs, map fst blockAssocs)) $ groupBy ((==) `on` snd) assocs
+
+      assocsWithBlockData = map (\(blockId, bounds) -> (blockId, lookupBlockData blockId, bounds)) assocsByBlock
+
+      expandBounds = Data.List.concatMap (uncurry enumFromTo)
+
+  ctxt <- liftM queryZMQContext getUserState
+
+  blockDatas <- forM assocsWithBlockData $
+       \(blockId, BlockInfo peers, bounds) -> do
+           let fetchRowsCmd = FetchRows (tsTableId ts) bounds [tsColumnId ts]
+               PeerName peerName = head peers
+           blockData <- liftIO $ sendRequest ctxt (Connect peerName) fetchRowsCmd $
+                        \response -> case response of
+                                       FetchRowsResponse results -> return $ (map head results)
+                                       x -> fail $ "Could not successfully get block " ++ show blockId ++ " from " ++ show peers ++ ": " ++ show x
+           return $ zip (expandBounds bounds) blockData
+
+  let allBlockData = concat blockDatas
+
+      startTime = tsStartTime ts
+      frequency = fromIntegral $ tsFrequency ts
+
+      rowIdToTime (RowID x) = let TOD seconds picoseconds = startTime
+                              in TOD (seconds + frequency * fromIntegral x) picoseconds
+
+      timedData = map (\(row, val) -> (rowIdToTime row, val)) allBlockData
+
+  return timedData
+
 
 alignTSs :: [TimeSeries] -> IO [TimeSeries]
 alignTSs (x:xs)

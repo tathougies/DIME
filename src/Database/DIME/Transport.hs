@@ -14,15 +14,15 @@ module Database.DIME.Transport
      safelyWithSocket,
      sendRequest, sendOneRequest, serveRequest,
 
-     proxy
+     proxy, tunnel
     ) where
 
 import qualified Control.Exception as E
 import Control.Monad (forever)
 
 import qualified Data.ByteString as Strict
+import Data.ByteString.Lazy
 import Data.Binary
-import Data.ByteString.Lazy hiding (head)
 
 import Foreign.C.Error
 
@@ -64,6 +64,9 @@ safeBind s interface = safeZmq (ZMQ.bind s interface)
 safeSend :: ZMQ.Sender a => ZMQ.Socket a -> [ZMQ.Flag] -> Strict.ByteString -> IO ()
 safeSend s flags dat = safeZmq (ZMQ.send s flags dat)
 
+safeSend' :: ZMQ.Sender a => ZMQ.Socket a -> [ZMQ.Flag] -> ByteString -> IO ()
+safeSend' s flags dat = safeZmq (ZMQ.send' s flags dat)
+
 safeReceive :: ZMQ.Receiver a => ZMQ.Socket a -> IO Strict.ByteString
 safeReceive s = safeZmq (ZMQ.receive s)
 
@@ -85,8 +88,8 @@ safelyWithSocket c socketType endPoint handler =
 
 sendOneRequest :: (Binary requestType, Binary responseType, ZMQ.Sender s, ZMQ.Receiver s) => ZMQ.Socket s -> requestType -> (responseType -> IO a) -> IO a
 sendOneRequest s request responseHandler = do
-    let cmdData = head $ toChunks $ encode $ request
-    safeSend s [] cmdData
+    let cmdData = encode $ request
+    safeSend' s [] cmdData
     reply <- safeReceive s
     let response = decode $ fromChunks [reply]
     responseHandler response
@@ -96,11 +99,15 @@ serveRequest s afterResp reqHandler = do
   line <- safeReceive s
   let cmd = decode $ fromChunks [line]
   response <- reqHandler cmd
-  safeSend s [] $ head $ toChunks $ encode response
+  safeSend' s [] $ encode response
   afterResp
 
-proxy :: (ZMQ.Receiver from, ZMQ.Sender to) => ZMQ.Socket from -> ZMQ.Socket to -> IO ()
-proxy from to =
-    forever $ do
-      parts <- ZMQ.receiveMulti from
-      ZMQ.sendMulti to parts
+proxy :: (ZMQ.Receiver from, ZMQ.Sender from, ZMQ.Sender to, ZMQ.Receiver to) => ZMQ.Socket from -> ZMQ.Socket to -> IO ()
+proxy from to = do
+  forkIO $ forever $ tunnel to from
+  forever $ tunnel from to
+
+tunnel :: (ZMQ.Receiver a, ZMQ.Sender b) => ZMQ.Socket a -> ZMQ.Socket b -> IO ()
+tunnel from to = do
+  parts <- ZMQ.receiveMulti from
+  ZMQ.sendMulti to parts

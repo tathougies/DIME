@@ -5,6 +5,8 @@ module Database.DIME.Flow.Types where
 
     import qualified Data.Tree.DisjointIntervalTree as DIT
     import qualified Data.Map as M
+    import qualified Data.List as L
+    import Data.Function
     import Data.Typeable
     import Data.Dynamic
     import Data.Int

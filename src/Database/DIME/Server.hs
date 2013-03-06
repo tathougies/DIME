@@ -29,6 +29,10 @@ import Network.HTTP.Types
 import Network.Wai.Handler.Warp (run)
 
 import System.Log.Logger
+import System.Time
+import System.Locale
+
+import qualified Text.JSON as J
 
 type HttpPath = [T.Text]
 
@@ -47,10 +51,19 @@ queryApp st [] request = do
   let queryText = T.pack $ BS.unpack $ postData
       queryCmd = RunQuery (QueryKey 0) queryText
 
+      formatTime calTime = (formatCalendarTime defaultTimeLocale "%Y-%m-%d %H:%M:%S." calTime) ++ show (ctPicosec calTime `div` 1000000)
+
   liftIO $ sendRequest (zmqContext st) (Connect "inproc://queries") queryCmd $
       \response ->
         case response of
-          QueryResponse dat -> ok [] $ LBS.pack $ show dat
+          QueryResponse (DoubleResult d) -> ok [] $ LBS.pack $ J.encode d  --LBS.pack $ show dat
+          QueryResponse (IntResult i) -> ok [] $ LBS.pack $ J.encode i
+          QueryResponse (StringResult t) -> ok [] $ LBS.pack $ J.encode t
+          QueryResponse (TimeSeriesResult tsData) -> do
+              adjData <- mapM (\(cTime, dat) -> do
+                                   calTime <- toCalendarTime cTime
+                                   return $ (formatTime calTime, dat)) tsData
+              ok [] $ LBS.pack $ J.encode adjData
           _ -> internalServerError
 
 queryApp _ _ _ = badRequest -- shouldn't have any more path components

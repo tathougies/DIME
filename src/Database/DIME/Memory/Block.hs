@@ -16,6 +16,7 @@ import Data.List.Split
 import Data.Default
 import Data.Binary
 import Data.Typeable
+import Data.Ratio
 
 import Data.Array.IArray ( (!), (//) )
 
@@ -37,7 +38,7 @@ blockLength = 65536 -- blocks store 65k entries
     The s type is the storage type
     The d type is the data type stored in the storage
 -}
-class (Show s, Read s, Binary s, Typeable s, NFData (Block s)) => BlockStorable s where
+class (Show s, Read s, Binary s, Typeable s, JSON s, NFData (Block s)) => BlockStorable s where
     data Block s
 
     -- | Get data at an index
@@ -189,6 +190,16 @@ instance Binary ColumnValue where
         "Int" -> liftM ColumnValue (get :: Get Int)
         "Double" -> liftM ColumnValue (get :: Get Double)
         "[Char]" -> liftM ColumnValue (get :: Get String)
+
+instance JSON ColumnValue where
+    showJSON (ColumnValue v) = showJSON v
+    readJSON (JSRational _ d) =
+        if denominator d == 1 then
+            Ok $ ColumnValue (fromIntegral $ numerator d :: Int)
+        else
+            Ok $ ColumnValue (fromRational d :: Double)
+    readJSON (JSString s) = Ok $ ColumnValue (fromJSString s)
+    readJSON _ = Error "Bad type for ColumnValue"
 
 -- | Data class for column types
 data ColumnType = IntColumn | StringColumn | DoubleColumn
