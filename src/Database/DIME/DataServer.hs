@@ -97,10 +97,12 @@ dataServerMain coordinatorName localAddress = do
   stateVar <- ServerState.mkEmptyServerState "dime-data"
   infoM moduleName "DIME data loaded..."
   withContext $ \c -> do
-      syncVar <- (newMVar :: IO (MVar ()))
+      syncVar <- (newEmptyMVar :: IO (MVar ()))
       statusId <- forkIO $ statusClient stateVar coordinatorServerName localAddress c
       distributorId <- forkIO $ requestDistributor c coordinatorQueryDealerName syncVar
       modifyIORef threadsRef (++ [statusId, distributorId])
+
+      infoM moduleName "Waiting for request broker..."
 
       takeMVar syncVar
 
