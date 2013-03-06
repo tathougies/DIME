@@ -97,9 +97,12 @@ dataServerMain coordinatorName localAddress = do
   stateVar <- ServerState.mkEmptyServerState "dime-data"
   infoM moduleName "DIME data loaded..."
   withContext $ \c -> do
+      syncVar <- (newMVar :: IO (MVar ()))
       statusId <- forkIO $ statusClient stateVar coordinatorServerName localAddress c
-      distributorId <- forkIO $ requestDistributor c coordinatorQueryDealerName
+      distributorId <- forkIO $ requestDistributor c coordinatorQueryDealerName syncVar
       modifyIORef threadsRef (++ [statusId, distributorId])
+
+      takeMVar syncVar
 
       let launchMainLoop = do
                         loopId <- forkIO $ mainLoop c stateVar coordinatorServerName coordinatorQueryDealerName
@@ -144,11 +147,12 @@ dataServerMain coordinatorName localAddress = do
                 forkIO $ untilTerm $ (tunnel dealerS routerS >> putStrLn "sending reply")
                 untilTerm $ tunnel routerS dealerS
 
-    requestDistributor c queryDealerName = do
+    requestDistributor c queryDealerName syncVar = do
       forkIO $ queryObserver c queryDealerName
       forkIO $ requestObserver c
       safelyWithSocket c Router (Bind "inproc://requests-in") $ \routerS ->
           safelyWithSocket c Dealer (Bind "inproc://requests") $ \dealerS -> do
+              putMVar syncVar ()
               forkIO $ untilTerm $ (tunnel routerS dealerS >> putStrLn "Got something back!")
               untilTerm $ tunnel dealerS routerS
 
@@ -213,7 +217,6 @@ dataServerMain coordinatorName localAddress = do
                  | isDouble retVal -> return $ QueryResponse $ DoubleResult $ asDouble retVal
                  | isTimeSeries retVal -> do
                             Right (_, tsData) <- runGMachine (readTimeSeries $ asTimeSeries retVal) state
-                            putStrLn $ "Got " ++ show tsData
                             return $ QueryResponse $ TimeSeriesResult tsData
                  | otherwise -> return $ Fail "Invalid type returned from query")
             (\(e :: SomeException) -> do
