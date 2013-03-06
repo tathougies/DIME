@@ -83,7 +83,6 @@ queryDistributor c = do
 
 serverMain :: IO ()
 serverMain = do
-  setDebugMode
   serverState <- newServerState "timeSeriesData.json"
   forkIO $ webServerMain serverState
   forkIO $ queryDistributor $ zmqContext serverState
