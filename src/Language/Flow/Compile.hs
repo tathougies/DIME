@@ -150,21 +150,23 @@ compileProgram program = liftM fst $ runStateT action emptyState
         --     * Lets must be transformed into series of lets and letrecs
         loadAllImports program
 
-        liftIO $ infoM moduleName "Going to compile"
+        liftIO $ infoM moduleName "Going to compile:"
         liftIO $ infoM moduleName $ L.prettyPrintAST $ L.flowProgramBody program
 
         resolvedBody <- resolveIdentifiers $ L.flowProgramBody program
+        liftIO $ infoM moduleName "\nAfter identifiers were resolved:"
         liftIO $ infoM moduleName $ L.prettyPrintAST $ resolvedBody
 
         simplifiedPatternsBody <- simplifyFunctionPatterns resolvedBody
 
         let body' = simplifiedPatternsBody
 
+        liftIO $ infoM moduleName "\nAfter simplifying patterns:"
         liftIO $ infoM moduleName $ L.prettyPrintAST $ body'
 
         -- Convert the AST into the enriched lambda calculus
         let enrichedLambdaE = lowerASTIntoEnrichedLambdaCalculus body'
-        liftIO $ infoM moduleName $ "And the base lambda:"
+        liftIO $ infoM moduleName $ "\nAnd the lowered lambda:"
         liftIO $ infoM moduleName $ show enrichedLambdaE
 
         -- Create the initial data that we'll need
