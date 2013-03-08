@@ -56,14 +56,14 @@ queryApp st [] request = do
   liftIO $ sendRequest (zmqContext st) (Connect "inproc://queries") queryCmd $
       \response ->
         case response of
-          QueryResponse (DoubleResult d) -> ok [] $ LBS.pack $ J.encode d  --LBS.pack $ show dat
-          QueryResponse (IntResult i) -> ok [] $ LBS.pack $ J.encode i
-          QueryResponse (StringResult t) -> ok [] $ LBS.pack $ J.encode t
+          QueryResponse (DoubleResult d) -> ok [contentTypeJson] $ LBS.pack $ J.encode d  --LBS.pack $ show dat
+          QueryResponse (IntResult i) -> ok [contentTypeJson] $ LBS.pack $ J.encode i
+          QueryResponse (StringResult t) -> ok [contentTypeJson] $ LBS.pack $ J.encode t
           QueryResponse (TimeSeriesResult tsData) -> do
               adjData <- mapM (\(cTime, dat) -> do
                                    calTime <- toCalendarTime cTime
                                    return $ (formatTime calTime, dat)) tsData
-              ok [] $ LBS.pack $ J.encode adjData
+              ok [contentTypeJson] $ LBS.pack $ J.encode adjData
           Fail e -> badRequest' (LBS.pack e)
           _ -> internalServerError
 

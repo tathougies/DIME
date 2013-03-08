@@ -37,7 +37,7 @@ listAllTimeSeries state request = do
     let tsVars = M.elems tssMap
     tss <- mapM readTVar tsVars
     return $ map getName tss
-  ok [] $ fromString $ encode tsNames
+  ok [contentTypeJson] $ fromString $ encode tsNames
 
 timeSeriesApp :: State -> TimeSeriesName -> [T.Text] -> Application
 timeSeriesApp state timeSeriesName path request =
@@ -56,7 +56,7 @@ timeSeriesApp state timeSeriesName path request =
                   do
                     timeSeries <- liftIO $ newTimeSeries timeSeriesName (read $ BS.unpack frequency) state
                     jsonRepr <- atomicallyR $ timeSeriesAsJSON timeSeries -- Create new time series, and display the information
-                    ok [] jsonRepr
+                    ok [contentTypeJson] jsonRepr
               _ -> badRequest
           Right GET -> do
             result <- atomicallyR $ lookupTimeSeries timeSeriesName state
@@ -64,7 +64,7 @@ timeSeriesApp state timeSeriesName path request =
               Nothing -> notFound
               Just timeSeries -> do
                           jsonRepr <- atomicallyR $ timeSeriesAsJSON timeSeries
-                          ok [] jsonRepr
+                          ok [contentTypeJson] jsonRepr
           _ -> badMethod
 
     dataPath state timeSeriesName path request =
@@ -127,7 +127,7 @@ timeSeriesApp state timeSeriesName path request =
                     let columnType = stringToColumnType typeStr
                     column <- liftIO $ newColumn timeSeriesName columnName columnType state
                     jsonRepr <- atomicallyR $ columnAsJSON column
-                    ok [] jsonRepr
+                    ok [contentTypeJson] jsonRepr
           Right GET -> do
             result <- atomicallyR $ lookupColumn timeSeriesName columnName state
             case result of
@@ -135,7 +135,7 @@ timeSeriesApp state timeSeriesName path request =
               Just column ->
                   do
                     jsonRepr <- atomicallyR $ columnAsJSON column
-                    ok [] jsonRepr
+                    ok [contentTypeJson] jsonRepr
           Right DELETE -> do
             liftIO $ deleteColumn timeSeriesName columnName state
             ok [] "Deleted column"

@@ -1,6 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Database.DIME.Server.HttpError
-    (badRequest, badRequest', notFound, badMethod, internalServerError, ok
+    (badRequest, badRequest', notFound, badMethod, internalServerError, ok,
+
+     contentTypeJson
     ) where
 
 import Control.Monad.IO.Class
@@ -29,3 +31,6 @@ internalServerError = liftIO $ return $ responseLBS status500 [("Content-Type", 
 
 ok :: MonadIO m => ResponseHeaders -> LBS.ByteString -> m Response
 ok headers lbs = return $ responseLBS status200 headers (LBS.append lbs (LBS.pack "\n"))
+
+contentTypeJson :: Header
+contentTypeJson = headerContentType "text/json"
