@@ -9,6 +9,7 @@ import Control.Monad.IO.Class
 
 import Network.Wai
 import Network.HTTP.Types
+import Network.HTTP.Types.Header
 
 --import Data.ByteString.Lazy.Char8 ()
 import qualified Data.ByteString.Lazy.Char8 as LBS
@@ -33,4 +34,4 @@ ok :: MonadIO m => ResponseHeaders -> LBS.ByteString -> m Response
 ok headers lbs = return $ responseLBS status200 headers (LBS.append lbs (LBS.pack "\n"))
 
 contentTypeJson :: Header
-contentTypeJson = headerContentType "text/json"
+contentTypeJson = (hContentType, "text/json")
