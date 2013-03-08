@@ -64,6 +64,7 @@ queryApp st [] request = do
                                    calTime <- toCalendarTime cTime
                                    return $ (formatTime calTime, dat)) tsData
               ok [] $ LBS.pack $ J.encode adjData
+          Fail e -> badRequest' (LBS.pack e)
           _ -> internalServerError
 
 queryApp _ _ _ = badRequest -- shouldn't have any more path components

@@ -315,10 +315,11 @@ getBlockInfo blockSpec DataServerState {getBlocks = blocks} =
                  blockType = B.typeRepToColumnType $ genericTypeOf block
                }
 
-mapServerBlock :: MapOperation -> [BlockSpec] -> BlockSpec -> RowID -> DataServerState -> Maybe DataServerState
-mapServerBlock op [] _ _ state = Nothing
-mapServerBlock op inputs output@(BlockSpec tableId columnId blockId) firstRow state =
+mapServerBlock :: MapOperation -> [BlockSpec] -> BlockSpec -> DataServerState -> Maybe DataServerState
+mapServerBlock op [] _ state = Nothing
+mapServerBlock op inputs output@(BlockSpec tableId columnId blockId) state =
     let firstBlockType = genericTypeOf $ head inputBlocks
+        firstRow = genericFirstRow $ head inputBlocks
         blocksTypeCheck = all ((== firstBlockType) . genericTypeOf) inputBlocks
 
         inputBlocks = map (fromJust . (flip M.lookup $ getBlocks state)) inputs

@@ -42,7 +42,7 @@ data Command = UpdateRows TableID [RowID] [ColumnID] [[ColumnValue]] |
 
                TransferBlock BlockSpec BlockSpec String |
 
-               Map MapOperation [BlockSpec] BlockSpec RowID |
+               Map MapOperation [BlockSpec] BlockSpec |
                --Calc CalcOperation BlockSpec |
                {-
                Reduce ReduceOperation TableID ColumnID BlockID |
@@ -75,12 +75,11 @@ instance Binary Command where
     put (BlockInfo blockSpec) = do
                           put blockInfoTag
                           put blockSpec
-    put (Map op inputs output firstRow) = do
+    put (Map op inputs output) = do
                           put mapTag
                           put op
                           put inputs
                           put output
-                          put firstRow
     put (RunQuery queryKey progTxt) = do
                           put runQueryTag
                           put queryKey
@@ -124,5 +123,4 @@ instance Binary Command where
             op <- get
             inputs <- get
             output <- get
-            firstRow <- get
-            return $ Map op inputs output firstRow
+            return $ Map op inputs output

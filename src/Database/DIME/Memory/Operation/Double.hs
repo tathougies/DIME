@@ -8,6 +8,8 @@ module Database.DIME.Memory.Operation.Double () where
 
     import Unsafe.Coerce
 
+    import System.IO.Unsafe
+
     checkCVDouble :: ColumnValue -> Bool
     checkCVDouble v = typeRepToColumnType (withColumnValue typeOf v) == DoubleColumn
 
@@ -30,7 +32,7 @@ module Database.DIME.Memory.Operation.Double () where
         mapBlock op [DoubleStorage x]
             | isElementaryUnaryMap op = Just $ DoubleStorage $ V.map (haskellOp op) x
         mapBlock op [DoubleStorage x, DoubleStorage y]
-            | isElementaryBinaryMap op = Just $ DoubleStorage $ V.zipWith (haskellOp2 op) x y
+            | isElementaryBinaryMap op = Just $ DoubleStorage $  V.zipWith (haskellOp2 op) x y
         mapBlock _ _ = Nothing
 
         isMappable _ = True

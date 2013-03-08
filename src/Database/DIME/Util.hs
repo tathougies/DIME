@@ -26,20 +26,20 @@ mapMaybeM f (x:xs) = do
     Nothing -> mapMaybeM f xs
     Just a -> (mapMaybeM f xs) >>= (return . (a:))
 
-withTVar :: TVar a -> (a -> STM b) -> STM b
-withTVar tVar f = do
-  val <- readTVar tVar
-  f val
+-- withTVar :: TVar a -> (a -> STM b) -> STM b
+-- withTVar tVar f = do
+--   val <- readTVar tVar
+--   f val
 
-modifyTVar :: TVar a -> (a -> STM a) -> STM a
-modifyTVar tVar f = do
-  val <- readTVar tVar
-  val' <- f val
-  writeTVar tVar val'
-  return val'
+-- modifyTVar :: TVar a -> (a -> STM a) -> STM a
+-- modifyTVar tVar f = do
+--   val <- readTVar tVar
+--   val' <- f val
+--   writeTVar tVar val'
+--   return val'
 
-modifyTVar_ :: TVar a -> (a -> STM a) -> STM ()
-modifyTVar_ tVar f = do
-  val <- readTVar tVar
-  val' <- f val
-  writeTVar tVar val'
+-- modifyTVar_ :: TVar a -> (a -> STM a) -> STM ()
+-- modifyTVar_ tVar f = do
+--   val <- readTVar tVar
+--   val' <- f val
+--   writeTVar tVar val'

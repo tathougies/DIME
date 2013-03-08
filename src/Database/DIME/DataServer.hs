@@ -14,6 +14,7 @@ import Control.Seq
 import qualified Data.ByteString as SB
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text as T
+import qualified Data.Set as S
 import Data.Binary
 import Data.String
 import Data.List
@@ -41,6 +42,7 @@ import Language.Flow.Compile
 import Language.Flow.Execution.Types
 import Language.Flow.Execution.GMachine
 
+import qualified System.ZMQ3 as ZMQ
 import System.Log.Logger
 import System.Console.Haskeline hiding (throwTo)
 import System.Console.Haskeline.IO
@@ -64,24 +66,26 @@ dumpDataPeriod = 5000000 -- one minute
 termSignalReceived :: IORef Bool
 termSignalReceived = unsafePerformIO $ newIORef False
 
-threadsRef :: IORef [ThreadId]
-threadsRef = unsafePerformIO $ newIORef []
+threadsRef :: TVar (S.Set ThreadId)
+threadsRef = unsafePerformIO $ newTVarIO S.empty
+
+runWithTermHandler :: IO () -> IO ()
+runWithTermHandler action =
+    E.catch action (\(e :: SigTermReceived) -> return ())
 
 untilTerm :: IO () -> IO ()
 untilTerm action = do
-  E.catch action (\(e :: SigTermReceived) -> return ())
+  runWithTermHandler action
   status <- readIORef termSignalReceived
   if status then
       do
-        putStrLn "done"
         return ()
    else untilTerm action
 
 termHandler :: IO ()
 termHandler = do
-  putStrLn "Term received"
-  threads <- readIORef threadsRef
-  forM threads (\threadId -> throwTo threadId SigTermReceived)
+  threads <- atomically $ readTVar threadsRef
+  forM (S.toList threads) (\threadId -> throwTo threadId SigTermReceived)
   writeIORef termSignalReceived True
 
 dataServerMain :: String -> String -> IO ()
@@ -91,26 +95,26 @@ dataServerMain coordinatorName localAddress = do
   infoM moduleName "DIME Data server starting up..."
   initFlowEngine
   mainThreadId <- myThreadId
-  modifyIORef threadsRef (mainThreadId:)
+  atomically $ modifyTVar threadsRef (S.insert mainThreadId)
   installHandler softwareTermination (CatchOnce termHandler) Nothing
   installHandler keyboardSignal (CatchOnce termHandler) Nothing
   stateVar <- ServerState.mkEmptyServerState "dime-data"
   infoM moduleName "DIME data loaded..."
   withContext $ \c -> do
-      syncVar <- (newEmptyMVar :: IO (MVar ()))
+      requestSyncVar <- (newEmptyMVar :: IO (MVar ()))
+      querySyncVar <- (newEmptyMVar :: IO (MVar ()))
       statusId <- forkIO $ statusClient stateVar coordinatorServerName localAddress c
-      distributorId <- forkIO $ requestDistributor c coordinatorQueryDealerName syncVar
-      modifyIORef threadsRef (++ [statusId, distributorId])
+      distributorId <- forkIO $ requestDistributor c requestSyncVar
+      queryBrokerId <- forkIO $ queryBroker c coordinatorQueryDealerName querySyncVar
+      atomically $ modifyTVar threadsRef (S.insert statusId . S.insert distributorId)
 
       infoM moduleName "Waiting for request broker..."
 
-      takeMVar syncVar
+      takeMVar requestSyncVar
+      takeMVar querySyncVar
 
-      let launchMainLoop = do
-                        loopId <- forkIO $ mainLoop c stateVar coordinatorServerName coordinatorQueryDealerName
-                        modifyIORef threadsRef (loopId:)
-
-      replicateM 3 $ launchMainLoop
+      replicateM 3 $ launchMainLoop c stateVar coordinatorServerName
+      replicateM 3 $ launchQueryLoop c coordinatorServerName
 
       untilTerm $ saveDataPeriodically stateVar
       putStrLn "Going to dump data..."
@@ -137,37 +141,51 @@ dataServerMain coordinatorName localAddress = do
       threadDelay dumpDataPeriod
       dumpData stateVar
 
-    queryObserver c queryDealerName =
-      safelyWithSocket c Router (Connect queryDealerName) $ \queryReceiverS ->
-          safelyWithSocket c Dealer (Connect "inproc://requests-in") $ \dealerS -> do
-              forkIO $ untilTerm $ (tunnel dealerS queryReceiverS >> putStrLn "sending retval")
-              untilTerm $ tunnel queryReceiverS dealerS
-
-    requestObserver c =
-        safelyWithSocket c Router (Bind ("tcp://127.0.0.1:" ++ show dataPort)) $ \routerS ->
-            safelyWithSocket c Dealer (Connect "inproc://requests-in") $ \dealerS -> do
-                forkIO $ untilTerm $ (tunnel dealerS routerS >> putStrLn "sending reply")
-                untilTerm $ tunnel routerS dealerS
-
-    requestDistributor c queryDealerName syncVar = do
-      forkIO $ queryObserver c queryDealerName
-      forkIO $ requestObserver c
-      safelyWithSocket c Router (Bind "inproc://requests-in") $ \routerS ->
-          safelyWithSocket c Dealer (Bind "inproc://requests") $ \dealerS -> do
+    queryBroker c queryDealerName syncVar =
+      safelyWithSocket c Router (Connect queryDealerName) $ \routerS ->
+          safelyWithSocket c Dealer (Bind "inproc://queries") $ \dealerS -> do
               putMVar syncVar ()
-              forkIO $ untilTerm $ (tunnel routerS dealerS >> putStrLn "Got something back!")
+              forkIO $ untilTerm $ tunnel routerS dealerS
               untilTerm $ tunnel dealerS routerS
 
-    mainLoop c stateVar coordinatorServerName coordinatorQueryDealerName =
+    requestDistributor c syncVar =
+      safelyWithSocket c Router (Bind $ "tcp://127.0.0.1:" ++ show dataPort) $ \routerS ->
+          safelyWithSocket c Dealer (Bind "inproc://requests") $ \dealerS -> do
+              putMVar syncVar ()
+              forkIO $ untilTerm $ tunnel routerS dealerS
+              untilTerm $ tunnel dealerS routerS
+
+    launchMainLoop c stateVar coordinatorServerName = do
+      loopId <- forkIO $ mainLoop c stateVar coordinatorServerName
+      atomically $ modifyTVar threadsRef (S.insert loopId)
+
+    launchQueryLoop c coordinatorServerName = do
+      loopId <- forkIO $ queryLoop c coordinatorServerName
+      atomically $ modifyTVar threadsRef (S.insert loopId)
+
+    queryLoop c coordinatorName = runWithTermHandler $ do
+        safelyWithSocket c Rep (Connect "inproc://queries") $
+               \s -> serveRequest s (return ()) $
+                     \(cmd :: Command) -> do
+                       launchQueryLoop c coordinatorName
+                       case cmd of
+                         RunQuery key txt -> doRunQuery c coordinatorName key txt
+                         _ -> return undefined
+
+    mainLoop c stateVar coordinatorServerName = runWithTermHandler $ do
+        threadId <- myThreadId
         safelyWithSocket c Rep (Connect "inproc://requests") $
-               \s -> untilTerm $ loop s c coordinatorServerName stateVar -- Run the loop with this state.
+               \s -> loop s c coordinatorServerName stateVar -- Run loop once (it creates more listeners as it moves)
+        atomically $ modifyTVar threadsRef (S.delete threadId)
 
     expandRowIds regions = concatMap (\(x, y) -> [x..(y - RowID 1)]) regions
 
-    loop s c coordinatorName stateVar =
+    loop s c coordinatorName stateVar = do
       serveRequest s (return ()) $
-         \(cmd ::Command) -> do
-            infoM moduleName $ "Received " ++ show cmd
+         \(cmd :: Command) -> do
+            launchMainLoop c stateVar coordinatorName
+            myId <- myThreadId
+            infoM moduleName $ "Received " ++ show cmd ++ " in " ++ show myId
             case cmd of
               RunQuery key txt -> doRunQuery c coordinatorName key txt -- this runs in the IO monad, non-atomically
               _ -> do
@@ -185,8 +203,8 @@ dataServerMain coordinatorName localAddress = do
                                     doDeleteBlock blockSpec state
                                 BlockInfo blockSpec ->
                                     doBlockInfo blockSpec state
-                                Map op inputs output firstRow ->
-                                    doMap op inputs output firstRow state
+                                Map op inputs output ->
+                                    doMap op inputs output state
                     case newState of
                       Just state' -> do
                           writeTVar stateVar state'
@@ -287,12 +305,14 @@ dataServerMain coordinatorName localAddress = do
          else
              return (BlockDoesNotExist, Nothing)
 
-    doMap op inputs output firstRow state =
+    doMap op inputs output state =
         let allInputsExist = all (flip ServerState.hasBlock state) inputs
         in if allInputsExist then
-               case ServerState.mapServerBlock op inputs output firstRow state of
+               case ServerState.mapServerBlock op inputs output state of
                  Nothing -> return (InconsistentTypes, Nothing)
-                 Just state' -> return (Ok, Just state')
+                 Just state' ->
+                     let blockInfo = ServerState.getBlockInfo output state'
+                     in return (MapResponse (BI.blockType blockInfo), Just state')
            else return (BlockDoesNotExist, Nothing)
 
 {-| Implements a simple client to the server above.

@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Database.DIME.Server.HttpError
-    (badRequest, notFound, badMethod, internalServerError, ok
+    (badRequest, badRequest', notFound, badMethod, internalServerError, ok
     ) where
 
 import Control.Monad.IO.Class
@@ -16,7 +16,10 @@ notFound :: MonadIO m => m Response
 notFound = return $ responseLBS status404 [("Content-Type", "text/plain")] "Not Found"
 
 badRequest :: MonadIO m => m Response
-badRequest = return $ responseLBS status400 [("Content-Type", "text/plain")] "Bad Request"
+badRequest = badRequest' "Bad Request"
+
+badRequest' :: MonadIO m => LBS.ByteString -> m Response
+badRequest' lbs = return $ responseLBS status400 [("Content-Type", "text/plain")] lbs
 
 badMethod :: MonadIO m => m Response
 badMethod = liftIO $ return $ responseLBS status401 [("Content-Type", "text/plain")] "Bad Method"
