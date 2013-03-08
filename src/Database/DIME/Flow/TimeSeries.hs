@@ -290,8 +290,19 @@ readTimeSeries ts = do
 
 alignTSs :: [TimeSeries] -> IO [TimeSeries]
 alignTSs (x:xs)
-    | all ((== (tsStartTime x)) . tsStartTime) xs && all ((== (tsFrequency x)) . tsFrequency) xs = return $ x:xs
+    | all ((withinBounds (tsFrequency x) (tsStartTime x)) . tsStartTime) xs && all ((== (tsFrequency x)) . tsFrequency) xs = return $ x:xs
     | otherwise = error "Alignment not yet implemented..."
+ where
+   withinBounds frequency time1 time2 = (time1 `absDiffClockTimesInSeconds` time2) < (fromIntegral frequency)
+
+   absDiffClockTimesInSeconds :: ClockTime -> ClockTime -> Double
+   absDiffClockTimesInSeconds t1@(TOD time1s time1ps) t2@(TOD time2s time2ps) =
+       if (time1s, time1ps) <= (time2s, time2ps) then
+           let secs = time2s - time1s
+               psecsDiff = time1ps - time2ps
+           in if psecsDiff < 0 then (fromIntegral $ secs - 1) + (fromIntegral (-psecsDiff) :: Double) / 1000000000000.0
+              else (fromIntegral $ secs) + (fromIntegral psecsDiff :: Double) / 1000000000000.0
+       else absDiffClockTimesInSeconds t2 t1
 
     -- mapTS :: MapOperation -> [TimeSeries] -> IO TimeSeries
     -- mapTS op tss = do
