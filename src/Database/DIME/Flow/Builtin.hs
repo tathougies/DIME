@@ -1,11 +1,13 @@
-{-# LANGUAGE ViewPatterns, RecordWildCards #-}
+{-# LANGUAGE ViewPatterns, RecordWildCards, OverloadedStrings #-}
 module Database.DIME.Flow.Builtin where
 
     import Control.Monad.Trans
+    import Control.Monad.State
     import Control.Monad
 
     import qualified Data.Map as M
     import qualified Data.Tree.DisjointIntervalTree as DIT
+    import qualified Data.IntSet as IntSet
     import Data.Text hiding (map, intercalate)
     import Data.List
     import Data.String
@@ -19,6 +21,7 @@ module Database.DIME.Flow.Builtin where
     import Database.DIME.Flow.Types
     import Database.DIME.Flow.TimeSeries
     import Database.DIME.Memory.Block (ColumnType(..))
+    import Database.DIME.Memory.Operation.Mappable
 
     import Language.Flow.Module
     import Language.Flow.Execution.Types
@@ -29,8 +32,9 @@ module Database.DIME.Flow.Builtin where
 
     dimeBuiltin :: Module
     dimeBuiltin = mkModule "DIME"
-                  [("timeSeries", mkBuiltin 1 builtinTimeSeries),
-                   ("mkTSAccessor", mkGeneric $ BuiltinFun 2 $ GCodeBuiltin builtinMkTSAccessor)]
+                  [("timeSeries", mkBuiltin "timeSeries" 1 builtinTimeSeries),
+                   ("mkTSAccessor", mkBuiltin' "mkTSAccessor" 2 builtinMkTSAccessor),
+                   ("mapTS", mkBuiltin' "mapTS" 3 builtinMapTS)]
         where
           builtinTimeSeries [x] = do
             if isString x then do
@@ -57,6 +61,42 @@ module Database.DIME.Flow.Builtin where
                                           show timeSeriesCollectionD
           builtinMkTSAccessor _ = throwError $ "mkTSAccessor takes one argument"
 
+          builtinMapTS [op, ts1, ts2] = do
+              gEvaluate ts1 -- strict in all arguments...
+              gEvaluate ts2
+              gEvaluate op
+              ts1D <- readGraph ts1
+              ts2D <- readGraph ts2
+              when ((not $ isTimeSeries ts1D) || (not $ isTimeSeries ts2D)) $
+                   throwError $ "The second and third arguments to mapTS must be TimeSeries objects"
+
+              gmachineState <- get
+              staticState <- liftIO $ freezeState gmachineState
+
+              let ts1TS = asTimeSeries ts1D
+                  ts2TS = asTimeSeries ts2D
+
+                  staticState' = staticState {
+                                   gmachineFrozenCode = [PushLocation op, MkAp, MkAp, Eval, ProgramDone],
+                                   gmachineFrozenDump = []
+                                 }
+
+                  initDataAddrs = map fst $ gmachineInitData gmachineState
+
+              oldData <- mapM readGraph initDataAddrs
+              mapM (uncurry writeGraph) $ gmachineInitData gmachineState -- write initial data
+              nonReachablePoints <- findNonReachablePoints ([op] ++ gmachineFrozenInitData staticState')
+              zipWithM writeGraph initDataAddrs oldData -- restore data
+
+              let staticState'' = staticState' {
+                                    gmachineFrozenGraph = (gmachineFrozenGraph staticState') // (map (\pt -> (pt, Hole)) nonReachablePoints),
+                                    gmachineFrozenFreeCells = IntSet.fromList $ map fromIntegral nonReachablePoints
+                                  }
+                  mapOp = GMachineMap staticState'' op
+
+              newTS <- mapTS mapOp [ts1TS, ts2TS]
+              returnPureGeneric $ newTS
+
     fetchTimeSeriesCollection :: TimeSeriesName -> GMachine TimeSeriesCollection
     fetchTimeSeriesCollection tsName = do
       userState <- (getUserState :: GMachine QueryState)
@@ -69,7 +109,6 @@ module Database.DIME.Flow.Builtin where
              (\response ->
                   case response of
                     Peers.TimeSeriesInfoResponse {..} -> do
-                        liftIO $ putStrLn $ "columns " ++ show columnNamesAndTypes
                         return $ TimeSeriesCollection {
                                      tscName = tableName,
                                      tscTableId = tableId,

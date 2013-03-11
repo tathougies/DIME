@@ -14,7 +14,7 @@ import Data.Either
 import Data.Maybe
 
 import qualified Language.Flow.AST as L
-import Language.Flow.Module
+import Language.Flow.Execution.Types (ModuleName)
 
 import qualified Text.Parsec as P
 import qualified Text.Parsec.Token as PT
@@ -386,7 +386,7 @@ apOrAtom = do
    applyArguments r f [] = f
    applyArguments r f (arg:args) = applyArguments r (L.Ap r f arg) args
 
-importDecl :: FlowParser (L.ModuleName, L.ModuleName, Bool)
+importDecl :: FlowParser (ModuleName, ModuleName, Bool)
 importDecl = do
   reserved "import"
   isGlobal <- (try $ reserved "qualified" >> return False ) <|> (return True)

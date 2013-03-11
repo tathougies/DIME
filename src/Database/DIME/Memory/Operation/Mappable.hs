@@ -8,17 +8,21 @@ module Database.DIME.Memory.Operation.Mappable where
 
     import Database.DIME.Memory.Block
 
+    import Language.Flow.Execution.Types
+
     data MapOperation = Sum |
                         AddConstant ColumnValue |
                         Product |
-                        Scale ColumnValue
+                        Scale ColumnValue |
+                        GMachineMap GMachineFrozenState GMachineAddress
          deriving (Show, Read)
 
-    sumTag, addConstantTag, productTag, scaleTag :: Int8
+    sumTag, addConstantTag, productTag, scaleTag, gmachineTag :: Int8
     sumTag = 1
     addConstantTag = 2
     productTag = 3
     scaleTag = 4
+    gmachineTag = 5
 
     instance Binary MapOperation where
         put Sum = put sumTag
@@ -29,6 +33,10 @@ module Database.DIME.Memory.Operation.Mappable where
         put (Scale v) = do
           put scaleTag
           put v
+        put (GMachineMap state fnAddr) = do
+          put gmachineTag
+          put state
+          put fnAddr
 
         get = do
           tag <- (get :: Get Int8)
@@ -37,6 +45,7 @@ module Database.DIME.Memory.Operation.Mappable where
             2 {- addConstantTag -} -> liftM AddConstant get
             3 {- productTag -} -> return Product
             4 {- scaleTag -} -> liftM Scale get
+            5 {- gmachineTag -} -> liftM2 GMachineMap get get
 
     isElementaryBinaryMap, isElementaryUnaryMap :: MapOperation -> Bool
 

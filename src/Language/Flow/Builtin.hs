@@ -1,4 +1,4 @@
-{-# LANGUAGE RankNTypes, ViewPatterns #-}
+{-# LANGUAGE RankNTypes, ViewPatterns, OverloadedStrings #-}
 module Language.Flow.Builtin where
 
 import Control.Monad
@@ -14,16 +14,16 @@ import Language.Flow.Module
 
 headwater :: Module -- The equivalent of the Haskell Prelude in Flow
 headwater = mkModule "HeadWater"
-            [("(+)", mkBuiltin 2 builtinAdd),
-             ("(-)", mkBuiltin 2 $ builtinBinOp "subtract" (-)),
-             ("(*)", mkBuiltin 2 builtinMul),
-             ("(/)", mkBuiltin 2 builtinDiv),
-             ("(**)", mkBuiltin 2 builtinPow),
-             ("negate", mkBuiltin 1 builtinNegate),
-             ("if", mkBuiltin 3 builtinIf),
-             ("error", mkBuiltin 1 builtinError),
-             ("mkAccessor", mkBuiltin 2 builtinMkAccessor),
-             ("Cons", mkGeneric $ BuiltinFun 2 $ GCodeBuiltin builtinCons),
+            [("(+)", mkBuiltin "(+)" 2 builtinAdd),
+             ("(-)", mkBuiltin "(-)" 2 $ builtinBinOp "subtract" (-)),
+             ("(*)", mkBuiltin "(*)" 2 builtinMul),
+             ("(/)", mkBuiltin "(/)" 2 builtinDiv),
+             ("(**)", mkBuiltin "(**)" 2 builtinPow),
+             ("negate", mkBuiltin "negate" 1 builtinNegate),
+             ("if", mkBuiltin "if" 3 builtinIf),
+             ("error", mkBuiltin "error" 1 builtinError),
+             ("mkAccessor", mkBuiltin "mkAccessor" 2 builtinMkAccessor),
+             ("Cons", mkBuiltin' "Cons" 2 builtinCons),
              ("Null", mkGeneric $ GNull),
              ("True", mkGeneric $ GTrue),
              ("False", mkGeneric$ GFalse)]
@@ -90,8 +90,8 @@ asList = checkCoerce (typeName (undefined :: GList))
 
 constrList :: GConstr -> [GMachineAddress] -> GenericGData
 constrList (T.unpack -> "Cons") [x, y] = mkGeneric $ GCons x y
-constrList (T.unpack -> "Null") [] = mkGeneric GNull
-constrList _ _ = error "Invalid constructor for List"
+constrList (T.unpack -> "[]") [] = mkGeneric GNull
+constrList cName _ = error $ "Invalid constructor for List: " ++ T.unpack cName
 
 instance GData GList where
     typeName _ = fromString "HeadWater.List"
@@ -137,5 +137,6 @@ instance GData GBool where
 
 initFlowLanguageBuiltins :: IO ()
 initFlowLanguageBuiltins = do
+  registerBuiltinModule headwater
   registerGData (undefined :: GBool) constrBool
   registerGData (undefined :: GList) constrList

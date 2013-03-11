@@ -1,4 +1,4 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving, MultiParamTypeClasses #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, MultiParamTypeClasses, RecordWildCards #-}
 module Language.Flow.Execution.GMachine
     (
      runGMachine,
@@ -13,8 +13,11 @@ module Language.Flow.Execution.GMachine
      throwError',
      trace,
 
+     allocGraphCell,
+     writeGraph,
      readGraph,
      findReachablePoints,
+     findNonReachablePoints,
      gEvaluate,
 
      pushDump,
@@ -22,7 +25,10 @@ module Language.Flow.Execution.GMachine
 
      pushStack,
      popStack,
-     topOfStack
+     topOfStack,
+
+     freezeState,
+     thawState
     ) where
 
 import Control.Monad
@@ -32,6 +38,7 @@ import Control.Monad.Trans
 import qualified Data.Map as Map
 import qualified Data.IntSet as IntSet
 import qualified Data.Text as T
+import Data.ByteString.Lazy (ByteString)
 import Data.Either
 import Data.List
 import Data.Dynamic
@@ -79,7 +86,7 @@ newGMachine graphSize userState initCode initData =
                                      gmachineGraph = graph,
                                      gmachineCode = initCode,
                                      gmachineDump = [],
-                                     gmachineInitData = map fst initData,
+                                     gmachineInitData = initData,
                                      gmachineFreeCells = IntSet.fromList [0..graphSize - 1],
                                      gmachineIndent = 0,
                                      gmachineDebug = False,
@@ -206,7 +213,7 @@ allocGraphCell = do
                    trace "Garbage collectting..."
                    let reachablePoints = gmachineStack state ++ -- All elements on the stack
                                          (concat $ map fst $ gmachineDump state) ++ -- All elements in the saved stack
-                                         (gmachineInitData state)
+                                         (map fst $ gmachineInitData state)
                    allReachablePoints <- liftM (IntSet.fromList . map fromIntegral) $
                                          findReachablePoints reachablePoints
 
@@ -219,6 +226,15 @@ allocGraphCell = do
                    when (IntSet.null freeCells') $ do -- if we couldn't free anything, then bail out
                        throwError "Out of memory"
                    modify (\state -> state { gmachineFreeCells = freeCells' })
+
+findNonReachablePoints :: [GMachineAddress] -> GMachine [GMachineAddress]
+findNonReachablePoints pts = do
+  reachable <- findReachablePoints pts
+  state <- get
+  (_, upperBound) <- liftIO $ getBounds $ gmachineGraph state
+  let reachableSet = IntSet.fromList $ map fromIntegral reachable
+      nonReachable = (IntSet.fromList [0 .. fromIntegral upperBound]) `IntSet.difference` reachableSet
+  return $ map fromIntegral $ IntSet.toList nonReachable
 
 findReachablePoints :: [GMachineAddress] -> GMachine [GMachineAddress]
 findReachablePoints reachablePoints = do
@@ -238,20 +254,6 @@ findReachablePoints reachablePoints = do
                        return accum'
                     else
                        findReachablePoints' reachablePointsSet accum'
-
--- getGlobal :: GlobalIdentifier -> GMachine GMachineAddress
--- getGlobal globalId = do
---   globals <- liftM gmachineGlobals get
---   case Map.lookup globalId globals of
---     Nothing -> throwError $ "Unknown global: " ++ show globalId
---     Just x -> return x
-
--- getBuiltin :: BuiltinIdentifier -> GMachine GMachineAddress
--- getBuiltin builtinId = do
---   builtins <- liftM gmachineBuiltins get
---   case Map.lookup builtinId builtins of
---     Nothing -> throwError $ "Unknown builtin: " ++ show builtinId
---     Just x -> return x
 
 gmachineCheck :: String -> (GMachineState -> Bool) -> GMachine ()
 gmachineCheck errorMsg predicate = do
@@ -351,9 +353,10 @@ doEval = do
                    Fun 0 c' -> do
                           popStack
                           pushDump [vAddr] c'
-                   BuiltinFun 0 _ -> do
+                   BuiltinFun 0 _ _ _ -> do
                           popStack
                           pushDump [vAddr] [CallBuiltin]
+                   _ -> return () -- Already evauated to the max
              else return ())
 
 doUnwind :: GMachine ()
@@ -376,14 +379,14 @@ doUnwind = do
                                      case asBuiltin vData' of
                                        Ap _ _ -> return () -- these are the valid types
                                        Fun _ _ -> return ()
-                                       BuiltinFun _ _ -> return ()
+                                       BuiltinFun _ _ _ _-> return ()
                                  else throwError $ "Cannot apply non-function value " ++ show vData' ++ " to arguments"-- invalid type
                             )
 
                         pushStack v'
                         pushInstr Unwind
                  Fun k c -> callFunction k c
-                 BuiltinFun k _ -> callFunction k [PushLocation vAddr, CallBuiltin]
+                 BuiltinFun k _ _ _ -> callFunction k [PushLocation vAddr, CallBuiltin]
            else do
              checkSingleElementStack "In the case of a constant at the top of stack during Unwind, the stack must contain only that constant"
              checkCodeEmpty "In the case of a constant at the top of stack during Unwind, the remaining code must be empty"
@@ -511,7 +514,7 @@ doCallBuiltin = do
   updateAddr <- liftM (last . gmachineStack) get
   st <- liftM gmachineStack get
   trace $ "Stack " ++ show st
-  b@(BuiltinFun arity (GCodeBuiltin builtin)) <- liftM (withGenericData asBuiltin) $ readGraph addr
+  b@(BuiltinFun arity _ _ (GCodeBuiltin builtin)) <- liftM (withGenericData asBuiltin) $ readGraph addr
 
   arguments <- replicateM arity popStack
   res <- builtin arguments
@@ -531,3 +534,29 @@ trace s = do
   if gmachineDebug st then
       liftIO $ putStrLn $ (replicate (gmachineIndent st) ' ') ++ s
    else return ()
+
+freezeState :: GMachineState -> IO GMachineFrozenState
+freezeState GMachineState {..} = do
+  graph <- freeze gmachineGraph
+  return GMachineFrozenState {
+                         gmachineFrozenStack = gmachineStack,
+                         gmachineFrozenGraph = graph // gmachineInitData, -- restore initial data
+                         gmachineFrozenCode = gmachineCode,
+                         gmachineFrozenDump = gmachineDump,
+                         gmachineFrozenInitData = map fst gmachineInitData,
+                         gmachineFrozenFreeCells = gmachineFreeCells,
+                         gmachineFrozenDebug = gmachineDebug}
+
+thawState :: Typeable a => a -> GMachineFrozenState -> IO GMachineState
+thawState userSt GMachineFrozenState {..} = do
+  ioGraph <- thaw gmachineFrozenGraph
+  return GMachineState {
+               gmachineStack = gmachineFrozenStack,
+               gmachineGraph = ioGraph,
+               gmachineCode = gmachineFrozenCode,
+               gmachineDump = gmachineFrozenDump,
+               gmachineInitData = zip gmachineFrozenInitData $ map (gmachineFrozenGraph !) gmachineFrozenInitData,
+               gmachineFreeCells = gmachineFrozenFreeCells,
+               gmachineIndent = 0,
+               gmachineDebug = gmachineFrozenDebug,
+               gmachineUserState = toDyn userSt}

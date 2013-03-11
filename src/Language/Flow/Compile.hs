@@ -1,9 +1,8 @@
+{-# LANGUAGE OverloadedStrings #-}
 module Language.Flow.Compile
-    (registerBuiltinModule,
-     builtinModules,
-
-     runProgramFromString,
+    (runProgramFromString,
      runProgramFromText,
+     compileProgramFromString,
      compileProgramFromText,
      compileProgram)
         where
@@ -30,7 +29,7 @@ import Data.Foldable (foldrM)
 import qualified Language.Flow.AST as L
 import qualified Language.Flow.Lambda.Enriched as E
 import qualified Language.Flow.Builtin as FlowBuiltin
-import Language.Flow.Execution.Types
+import Language.Flow.Execution.Types hiding (Ap)
 import Language.Flow.Parse
 import Language.Flow.Module
 import Language.Flow.Execution.GMachine
@@ -43,32 +42,18 @@ import Text.Parsec (sourceName, sourceLine, sourceColumn)
 moduleName = "Language.Flow.Compile"
 
 data FlowCompilerState = State {
-      moduleMap :: M.Map L.ModuleName Module, -- map module names to module objects
-      globalModules :: [L.ModuleName], -- modules in the global namespace
+      moduleMap :: M.Map ModuleName Module, -- map module names to module objects
+      globalModules :: [ModuleName], -- modules in the global namespace
 
-      referencedSymbols :: S.Set (L.ModuleName, L.VariableName), -- Set of referenced symbols
+      referencedSymbols :: S.Set (ModuleName, L.VariableName), -- Set of referenced symbols
 
-      symbolMap :: M.Map (L.ModuleName, L.VariableName) GMachineAddress, -- Map of symbols to pseud-addresses
+      symbolMap :: M.Map (ModuleName, L.VariableName) GMachineAddress, -- Map of symbols to pseud-addresses
       curAddress :: GMachineAddress,
 
       curVarId :: VarID
     }
 
 type FlowCompiler = StateT FlowCompilerState IO
-
-{-# NOINLINE builtinModules #-}
-builtinModules :: IORef (M.Map L.ModuleName Module)
-builtinModules = unsafePerformIO $ do
-                   newIORef $ M.fromList $ map (\m -> (flowModuleName m, m)) builtinModulesList
-    where
-      builtinModulesList = [FlowBuiltin.headwater] -- Add extra modules here
-
-getBuiltinModules :: FlowCompiler (M.Map L.ModuleName Module)
-getBuiltinModules = liftIO $ readIORef builtinModules
-
-registerBuiltinModule :: Module -> IO ()
-registerBuiltinModule mod = modifyIORef builtinModules $
-                                M.insert (flowModuleName mod) mod
 
 emptyState = State {
                moduleMap = M.empty,
@@ -103,7 +88,7 @@ allocNextVarId = do
   put $ st { curVarId = 1 + curVarId st }
   return $ curVarId st
 
-getSymbolAddress :: (L.ModuleName, L.VariableName) -> FlowCompiler GMachineAddress
+getSymbolAddress :: (ModuleName, L.VariableName) -> FlowCompiler GMachineAddress
 getSymbolAddress symbol = do
   symMap <- liftM symbolMap get
   case M.lookup symbol symMap of
@@ -194,14 +179,14 @@ loadAllImports program = do
 
   modify (\st -> st { globalModules = L.flowGlobalImports program })
 
-loadModule :: L.ModuleName -> L.ModuleName -> FlowCompiler ()
+loadModule :: ModuleName -> ModuleName -> FlowCompiler ()
 loadModule moduleName modulePseudonym = do
-  bm <- getBuiltinModules
+  bm <- liftIO $ getBuiltinModules
   case M.lookup moduleName bm of -- check builtin modules first
     Just mod -> addModule modulePseudonym mod -- simply add the module to the list
-    Nothing -> fail "need to add support for loading modules from disk"
+    Nothing -> fail $ "need to add support for loading modules from disk: " ++ show moduleName
 
-addModule :: L.ModuleName -> Module -> FlowCompiler ()
+addModule :: ModuleName -> Module -> FlowCompiler ()
 addModule moduleName mod = modify (\st -> st { moduleMap = M.insert moduleName mod $ moduleMap st })
 
 formatRegion :: L.Region -> String
@@ -220,13 +205,13 @@ mkErrorCall e = do
              (L.LocationRef L.EmptyRegion symbolAddress)
              (L.Literal L.EmptyRegion $ L.StringLiteral $ fromString e)
 
-lookupIdentifier :: M.Map L.VariableName VarID -> L.VariableName -> FlowCompiler (Maybe (Either VarID (L.ModuleName, L.VariableName)))
+lookupIdentifier :: M.Map L.VariableName VarID -> L.VariableName -> FlowCompiler (Maybe (Either VarID (ModuleName, L.VariableName)))
 lookupIdentifier scope name = do
   let L.VariableName nameText = name
   if isJust $ T.find (=='.') nameText then do
       -- Fully qualified name
       let components = T.split (=='.') nameText
-          modName = L.ModuleName $ T.intercalate (fromString ".") $ List.init components
+          modName = ModuleName $ T.intercalate (fromString ".") $ List.init components
           member = L.VariableName $ List.last components
       modules <- liftM moduleMap get
       case M.lookup modName modules of
@@ -253,7 +238,7 @@ lookupIdentifier scope name = do
           globalMods <- liftM globalModules get
           lookupGlobal name globalMods
 
-referenceSymbol :: (L.ModuleName, L.VariableName) -> FlowCompiler ()
+referenceSymbol :: (ModuleName, L.VariableName) -> FlowCompiler ()
 referenceSymbol symbol = modify (\st -> st { referencedSymbols = S.insert symbol $ referencedSymbols st })
 
 resolveIdentifiers :: L.Expression -> FlowCompiler L.Expression

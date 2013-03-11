@@ -24,6 +24,7 @@ import Data.Either.Utils
 
 import System.IO.Unsafe
 
+{-# NOINLINE configVar #-}
 configVar :: TVar CP.ConfigParser
 configVar = unsafePerformIO $ do
               cp <- runErrorT $ do

@@ -7,7 +7,6 @@ module Language.Flow.AST
       TypeAssertion(..),
       Pattern(..),
       Type(..),
-      ModuleName(..),
       VariableName(..),
       TypeName(..),
       Region(..),
@@ -31,13 +30,6 @@ import System.IO.Unsafe
 import Text.JSON
 import Text.Parsec (SourcePos)
 import Text.PrettyPrint.HughesPJ
-
-newtype ModuleName = ModuleName T.Text
-    deriving (Ord, Eq, Show, Read, JSON, IsString)
-newtype VariableName = VariableName T.Text
-    deriving (Ord, Eq, Show, Read, JSON, IsString)
-newtype TypeName = TypeName T.Text
-    deriving (Ord, Eq, Show, Read, JSON, IsString)
 
 data Pattern =
     VariablePattern Region VariableName | -- Constructor arguments
@@ -99,6 +91,7 @@ data Program = Program {
       flowProgramBody :: Expression
     }
 
+{-# NOINLINE universalImportsVar #-}
 universalImportsVar :: IORef [(ModuleName, ModuleName)]
 universalImportsVar = unsafePerformIO $ newIORef [(fromString "HeadWater", fromString "HeadWater")]
 

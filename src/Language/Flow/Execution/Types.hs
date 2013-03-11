@@ -1,4 +1,4 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving, BangPatterns, ExistentialQuantification, RankNTypes, DeriveDataTypeable #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, BangPatterns, ExistentialQuantification, RankNTypes, DeriveDataTypeable, RecordWildCards #-}
 module Language.Flow.Execution.Types where
 
 import qualified Data.IntSet as IntSet
@@ -20,16 +20,24 @@ import Control.Exception
 
 import System.IO.Unsafe
 
+import Text.JSON
+
 import Unsafe.Coerce
 
 newtype GMachineAddress = GMachineAddress Int
     deriving (Ord, Eq, Enum, Show, Read, Num, Ix, Integral, Real, Binary)
 newtype StackOffset = StackOffset Int
-    deriving (Ord, Eq, Enum, Show, Read, Num, Ix, Integral, Real)
+    deriving (Ord, Eq, Enum, Show, Read, Num, Ix, Integral, Real, Binary)
 newtype VarID = VarID Int
     deriving (Ord, Eq, Show, Read, Num, Integral, Real, Enum)
 newtype SCName = SCName Int
     deriving (Ord, Eq, Show, Read, Num, Integral, Real, Enum)
+newtype VariableName = VariableName Text
+    deriving (Ord, Eq, Show, Read, JSON, IsString, Binary)
+newtype TypeName = TypeName Text
+    deriving (Ord, Eq, Show, Read, JSON, IsString, Binary)
+newtype ModuleName = ModuleName Text
+    deriving (Ord, Eq, Show, Read, JSON, IsString, Binary)
 
 type Label = Int
 type GMachineStack = [GMachineAddress]
@@ -58,12 +66,58 @@ data GMachineState = GMachineState {
       gmachineGraph :: IOArray GMachineAddress GenericGData,
       gmachineCode :: GCodeSequence,
       gmachineDump :: [(GMachineStack, GCodeSequence)],
-      gmachineInitData :: [GMachineAddress],
+      gmachineInitData :: [(GMachineAddress, GenericGData)],
       gmachineFreeCells :: IntSet.IntSet,
       gmachineIndent :: Int,
       gmachineDebug :: Bool,
       gmachineUserState :: Dynamic
     }
+
+data GMachineFrozenState = GMachineFrozenState {
+      gmachineFrozenStack :: GMachineStack,
+      gmachineFrozenGraph :: Array GMachineAddress GenericGData,
+      gmachineFrozenCode :: GCodeSequence,
+      gmachineFrozenDump :: [(GMachineStack, GCodeSequence)],
+      gmachineFrozenInitData :: [GMachineAddress],
+      gmachineFrozenFreeCells :: IntSet.IntSet,
+      gmachineFrozenDebug :: Bool
+    }
+ deriving (Show)
+
+instance Read GMachineFrozenState where -- necessary so that MapOperation is Read'able
+    readsPrec = error "Can't read GMachineFrozenState"
+
+instance Binary GMachineFrozenState where
+    put GMachineFrozenState {..} = do
+      put gmachineFrozenStack
+      put gmachineFrozenGraph
+      put gmachineFrozenCode
+      put gmachineFrozenDump
+      put gmachineFrozenInitData
+      put gmachineFrozenFreeCells
+      put gmachineFrozenDebug
+
+    get = return GMachineFrozenState `ap` get `ap` get `ap` get `ap`
+          get `ap` get `ap` get `ap` get
+
+data Module = Module {
+            flowModuleName :: ModuleName,
+            flowModuleMembers :: M.Map VariableName GenericGData
+    }
+ deriving Show
+
+{-# NOINLINE builtinModules #-}
+builtinModules :: IORef (M.Map ModuleName Module)
+builtinModules = unsafePerformIO $ do
+                   newIORef $ M.fromList $ Prelude.map (\m -> (flowModuleName m, m)) []
+
+getBuiltinModules :: IO (M.Map ModuleName Module)
+getBuiltinModules = readIORef builtinModules
+
+registerBuiltinModule :: Module -> IO ()
+registerBuiltinModule mod =
+    modifyIORef builtinModules $
+                M.insert (flowModuleName mod) mod
 
 -- | G-Machine instructions as found in Simon Peyton-Jones's book w/ some modifications
 data GCode =
@@ -93,6 +147,88 @@ data GCode =
     CallBuiltin |
     ProgramDone
     deriving (Show, Eq)
+
+instance Binary GCode where
+    put Eval = put (0 :: Int8)
+    put Unwind = put (1 :: Int8)
+    put Return = put (2 :: Int8)
+    put (Jump l) = do
+                 put (3 :: Int8)
+                 put l
+    put (JFalse l) = do
+                 put (4 :: Int8)
+                 put l
+    put (Examine constr arity offset) = do
+                 put (5 :: Int8)
+                 put constr
+                 put arity
+                 put offset
+    put (Push stackOfs) = do
+                 put (6 :: Int8)
+                 put stackOfs
+    put (PushInt i) = do
+                 put (7 :: Int8)
+                 put i
+    put (PushString s) = do
+                 put (8 :: Int8)
+                 put s
+    put (PushDouble d) = do
+                 put (9 :: Int8)
+                 put d
+    put (PushLocation l) = do
+                 put (10 :: Int8)
+                 put l
+    put (Pop stackOfs) = do
+                 put (11 :: Int8)
+                 put stackOfs
+    put (Slide stackOfs) = do
+                 put (12 :: Int8)
+                 put stackOfs
+    put (Update stackOfs) = do
+                 put (13 :: Int8)
+                 put stackOfs
+    put (Alloc count) = do
+                 put (14 :: Int8)
+                 put count
+    put MkAp = put (15 :: Int8)
+    put CallBuiltin = put (16 :: Int8)
+    put ProgramDone = put (17 :: Int8)
+
+    get = do
+      tag <- (get :: Get Int8)
+      case tag of
+        0 -> return Eval
+        1 -> return Unwind
+        2 -> return Return
+        3 -> doJump
+        4 -> doJFalse
+        5 -> doExamine
+        6 -> doPush
+        7 -> doPushInt
+        8 -> doPushString
+        9 -> doPushDouble
+        10 -> doPushLocation
+        11 -> doPop
+        12 -> doSlide
+        13 -> doUpdate
+        14 -> doAlloc
+        15 -> return MkAp
+        16 -> return CallBuiltin
+        17 -> return ProgramDone
+
+     where
+       doJump = liftM Jump get
+       doJFalse = liftM JFalse get
+       doExamine = liftM3 Examine get get get
+       doPush = liftM Push get
+       doPushInt = liftM PushInt get
+       doPushString = liftM PushString get
+       doPushDouble = liftM PushDouble get
+       doPushLocation = liftM PushLocation get
+       doPop = liftM Pop get
+       doSlide = liftM Slide get
+       doUpdate = liftM Update get
+       doAlloc = liftM Alloc get
 
 -- Data
 
@@ -138,6 +274,7 @@ class (Show a) => GData a where
     runGeneric :: a -> String -> [GenericGData] -> GMachine (Maybe GenericGData)
     runGeneric a gen = error $ "Generic " ++ gen ++ " not supported by " ++ (unpack $ typeName a)
 
+{-# NOINLINE gDataConstrFuncsVar #-}
 gDataConstrFuncsVar :: IORef (Map GTypeName (GConstr -> [GMachineAddress] -> GenericGData))
 gDataConstrFuncsVar = unsafePerformIO $ newIORef M.empty
 
@@ -157,6 +294,7 @@ instance Binary Text where
     get = liftM pack get
 
 instance Binary GenericGData where
+    put Hole = put (-1 :: Int8)
     put x
      | isInteger x = do
            put (1 :: Int8)
@@ -167,6 +305,20 @@ instance Binary GenericGData where
      | isDouble x = do
            put (3 :: Int8)
            put (asDouble x)
+     | withGenericData isBuiltin x =
+           case withGenericData asBuiltin x of
+             Ap a b -> do
+               put (4 :: Int8)
+               put a
+               put b
+             Fun arity code -> do
+               put (5 :: Int8)
+               put arity
+               put code
+             BuiltinFun _ modName symName _ -> do
+               put (6 :: Int8)
+               put modName
+               put symName
      | otherwise = do
            put (0 :: Int8)
            put (withGenericData typeName x)
@@ -176,9 +328,28 @@ instance Binary GenericGData where
     get = do
       tag <- (get :: Get Int8)
       case tag of
+        -1 -> return Hole
         1 {- IntConstant -} -> liftM (mkGeneric . IntConstant) get
         2 {- StringConstant -} -> liftM (mkGeneric . StringConstant) get
         3 {- DoubleConstant -} -> liftM (mkGeneric . DoubleConstant) get
+        4 {- BuiltinData Ap -} -> do
+                               a <- get
+                               b <- get
+                               return $ mkGeneric $ Ap a b
+        5 {- BuiltinData Fun -} -> do
+                               arity <- get
+                               code <- get
+                               return $ mkGeneric $ Fun arity code
+        6 {- BuiltinData BuiltinFun -} -> do
+                               modName <- get
+                               symName <- get
+                               let allBuiltinModules = unsafePerformIO $ readIORef builtinModules
+                               case M.lookup modName allBuiltinModules of
+                                 Nothing -> error $ "Could not find builtin module " ++ show modName
+                                 Just Module { flowModuleMembers = mod } ->
+                                     case M.lookup symName mod of
+                                       Nothing -> error $ "Could not find " ++ show symName ++ " in " ++ show modName
+                                       Just sym -> return sym
         0 -> do
             typeName <- (get :: Get GTypeName)
             case M.lookup typeName gDataConstrFuncs of
@@ -240,7 +411,7 @@ instance GData DoubleConstant where
 
 data BuiltinData = Ap {-# UNPACK #-} !GMachineAddress {-# UNPACK #-} !GMachineAddress |
                    Fun {-# UNPACK #-} !Int GCodeSequence |
-                   BuiltinFun {-# UNPACK #-} !Int GCodeBuiltin
+                   BuiltinFun {-# UNPACK #-} !Int !ModuleName !VariableName GCodeBuiltin
 
 asBuiltin :: GData a => a -> BuiltinData
 asBuiltin dat = if isBuiltin dat then unsafeCoerce dat else
@@ -249,24 +420,19 @@ asBuiltin dat = if isBuiltin dat then unsafeCoerce dat else
 instance GData BuiltinData where
     typeName _ = fromString "BuiltinData"
     constr _ = error "Attempt to examine constructor of builtin data"
-    constrArgs (Ap a1 a2) = listArray (0, 2) [a1, a2]
+    constrArgs (Ap a1 a2) = listArray (0, 1) [a1, a2]
     constrArgs _ = array (0,-1) []
     isBuiltin _ = True
 
 instance Show BuiltinData where
     show (Ap a b) = "Ap (" ++ show a ++ ") (" ++ show b ++ ")"
     show (Fun i s) = "Fun " ++ show i ++ " " ++ show s
-    show (BuiltinFun i _) = "BuiltinFun " ++ show i ++ " <builtin>"
+    show (BuiltinFun i modName symbolName _) = "BuiltinFun " ++ show i ++ " (" ++ show symbolName ++ " from " ++ show modName ++ ")"
 
 instance Show GMachineError where
     show (GMachineError _ e) = e
 
 instance Exception GMachineError
-
--- instance Show GCodeProgram where
---     show (GCodeProgram { initCode = initCode,
---                          initialData = inititalData } ) =
---          "GCodeProgram { initCode = " ++ show initCode ++ ", superCombinators = " ++ show superCombinators ++ " }"
 
 todo :: MonadIO m => String -> m ()
 todo = liftIO . putStrLn . ("TODO: " ++)
