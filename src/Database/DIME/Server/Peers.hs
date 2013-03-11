@@ -96,7 +96,7 @@ peerServer serverState = do
         modifyTVar' peersInfoVar (\x -> x { getPeersUsage = peersUsage' })
 
         return peerAdded
-      when peerAdded $ putStrLn $ "Added peer " ++ show peerName
+      when peerAdded (infoM moduleName $ "Added peer " ++ show peerName)
       if peerAdded
        then return InfoRequest
        else return Ok

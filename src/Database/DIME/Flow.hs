@@ -6,6 +6,7 @@ module Database.DIME.Flow
     import Language.Flow.Compile
     import Language.Flow.AST
     import Language.Flow.Builtin
+    import Language.Flow.Execution.Types
 
     import qualified Data.Map as M
     import Data.IORef
@@ -21,5 +22,3 @@ module Database.DIME.Flow
       initFlowLanguageBuiltins
       registerBuiltinModule dimeBuiltin
       addUniversalImport (fromString "DIME") -- automatically import the DIME module
-      a <- readIORef builtinModules
-      putStrLn $ show $ M.keys a

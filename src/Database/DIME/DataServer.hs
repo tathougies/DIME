@@ -63,9 +63,11 @@ instance Exception SigTermReceived
 keepAliveTime = 10000000
 dumpDataPeriod = 5000000 -- one minute
 
+{-# NOINLINE termSignalReceived #-}
 termSignalReceived :: IORef Bool
 termSignalReceived = unsafePerformIO $ newIORef False
 
+{-# NOINLINE threadsRef #-}
 threadsRef :: TVar (S.Set ThreadId)
 threadsRef = unsafePerformIO $ newTVarIO S.empty
 
@@ -117,7 +119,7 @@ dataServerMain coordinatorName localAddress = do
       replicateM 3 $ launchQueryLoop c coordinatorServerName
 
       untilTerm $ saveDataPeriodically stateVar
-      putStrLn "Going to dump data..."
+      infoM moduleName "Going to dump data..."
       dumpData stateVar
       exitWith ExitSuccess
       return ()
@@ -184,8 +186,6 @@ dataServerMain coordinatorName localAddress = do
       serveRequest s (return ()) $
          \(cmd :: Command) -> do
             launchMainLoop c stateVar coordinatorName
-            myId <- myThreadId
-            infoM moduleName $ "Received " ++ show cmd ++ " in " ++ show myId
             case cmd of
               RunQuery key txt -> doRunQuery c coordinatorName key txt -- this runs in the IO monad, non-atomically
               _ -> do
@@ -240,7 +240,7 @@ dataServerMain coordinatorName localAddress = do
                             return $ QueryResponse $ TimeSeriesResult tsData
                  | otherwise -> return $ Fail "Invalid type returned from query")
             (\(e :: SomeException) -> do
-               putStrLn $ "Exc: " ++ show e
+               errorM moduleName $ "Exception during Query: " ++ show e
                return $ Fail $ show e)
 
     doFetchRows tableId rowIds columnIds state =

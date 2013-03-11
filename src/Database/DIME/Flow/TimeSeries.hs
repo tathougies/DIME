@@ -96,20 +96,20 @@ instance GData TimeSeries where
 
     runGeneric _ "add" [x, y] = do
                             newTS <- addTS (asTimeSeries x) (asTimeSeries y)
-                            returnPureGeneric newTS -- returnPureGeneric $ StringConstant $ fromString $ "Addition of " ++ withGenericData show x ++ " and " ++ withGenericData show y
+                            returnPureGeneric newTS
 
 allocNewColumn :: GMachine ColumnID
 allocNewColumn = return (ColumnID 5)
 
 getResultTable :: GMachine TableID
-getResultTable = return (TableID 10) -- throwError "getResultTable"
+getResultTable = return (TableID 10)
 
 mapTS :: MapOperation -> [TimeSeries] -> GMachine TimeSeries
 mapTS op timeSeriess = do
   timeSeriess <- liftIO $ alignTSs timeSeriess
   let (masterTimeSeriesI, _) = minimumBy (compare `on` (M.size . tsBlocks . snd)) (zip [0..] timeSeriess) -- get timeseries with least number of blocks...
       timeSeries'' = let (init, _:tail) = splitAt masterTimeSeriesI timeSeriess
-                     in init ++ tail -- splce out the master time series
+                     in init ++ tail -- splice out the master time series
       columnTypes = map tsDataType timeSeries''
       alignment = alignBlocks timeSeriess
 
@@ -121,14 +121,6 @@ mapTS op timeSeriess = do
               Just (BlockInfo peers) = M.lookup blockId $ tsBlocks timeSeries
               PeerName name = head peers
           in name
-
-      -- masterTimeSeriesBlockToBeginning =
-      --     let masterTimeSeries = timeSeriess !! masterTimeSeriesI
-      --     in M.fromList $ Tuple.swap $ DIT.assocs $ tsAllocatedBlocks masterTimeSeries
-
-      -- lookupFirstAllocatedRowId (BlockSpec tableId columnId blockId) =
-      --     let Just (firstRow, _) = M.lookup blockId masterTimeSeriesBlockToBeginning
-      --     in firstRow
 
       transfer s bounds toBlockSpec fromBlockSpec fromPeer =
           let transferCmd = TransferBlock toBlockSpec fromBlockSpec fromPeer

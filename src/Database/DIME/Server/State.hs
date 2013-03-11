@@ -169,7 +169,7 @@ newServerState configLocation = do
           parsed <- parseSeriesData unparsedData
           case parsed of
             Error e -> do
-                        putStrLn $ "Error parsing series " ++ name ++ " : " ++ e
+                        errorM moduleName $ "Error parsing series " ++ name ++ " : " ++ e
                         return Nothing
             Ok x -> return $ Just (name, x)
 
@@ -451,8 +451,6 @@ appendRow timeSeriesName columnsAndValues state =
         -- Calculate a heuristic for each of the considerable peers.
         -- The peer with the highest number wins. If there are no considerable peers, find
         -- the overall least utilized peer
-        -- putStrLn $ show $ getPeerName $ head considerablePeers
-        -- putStrLn $ show $ getPeerDistance $ getPeerName $ head considerablePeers
         case considerablePeers of
           [] -> getLeastUtilizedPeer peersData
           _ -> do

@@ -114,7 +114,6 @@ restoreStateFromChunks state = do
   forM allColumns $
        (\columnSpec -> do
           columnData <- readFile $ columnFileName chunkDir columnSpec
-          putStrLn $ "Loading " ++ show columnSpec
           let (tableId, columnId, rowMappings) = case JSON.decode columnData of
                   Ok (JSObject columnDict) -> parseColumn columnDict
                   Ok x -> error $ "Couldn't read column " ++ show columnSpec ++ ": bad type"
