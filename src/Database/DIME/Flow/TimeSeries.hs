@@ -143,7 +143,7 @@ mapTS op timeSeriess = do
   let groupedAlignments = groupBy ((==) `on` ((!! masterTimeSeriesI) . snd)) alignment
       alignment' = map (\alignmentGroup -> let (bounds, blocks) = head alignmentGroup
                                                masterBlock = blocks !! masterTimeSeriesI
-                                               alignmentGroup' = map (\(bounds, xs) -> (bounds, splice masterTimeSeriesI xs)) alignmentGroup
+                                               alignmentGroup' = map (\(bounds, xs) -> (bounds, splice masterTimeSeriesI xs)) alignmentGroupw
                                            in (masterBlock, alignmentGroup')) groupedAlignments
 
       newBlock = do
