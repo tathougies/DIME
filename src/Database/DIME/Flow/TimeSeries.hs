@@ -22,6 +22,7 @@ import Data.Function
 
 import qualified Database.DIME.Server.Peers as Peers
 import Database.DIME
+import Database.DIME.Util
 import Database.DIME.Transport
 import Database.DIME.Server.State
 import Database.DIME.Flow.Types
@@ -108,9 +109,10 @@ mapTS :: MapOperation -> [TimeSeries] -> GMachine TimeSeries
 mapTS op timeSeriess = do
   timeSeriess <- liftIO $ alignTSs timeSeriess
   let (masterTimeSeriesI, _) = minimumBy (compare `on` (M.size . tsBlocks . snd)) (zip [0..] timeSeriess) -- get timeseries with least number of blocks...
-      timeSeries'' = let (init, _:tail) = splitAt masterTimeSeriesI timeSeriess
-                     in init ++ tail -- splice out the master time series
+
+      timeSeries'' = splice masterTimeSeriesI timeSeriess -- remove the master time series from the list of time series to operate on
       columnTypes = map tsDataType timeSeries''
+
       alignment = alignBlocks timeSeriess
 
       tsKey ts = (tsTableId ts, tsColumnId ts)
@@ -141,8 +143,7 @@ mapTS op timeSeriess = do
   let groupedAlignments = groupBy ((==) `on` ((!! masterTimeSeriesI) . snd)) alignment
       alignment' = map (\alignmentGroup -> let (bounds, blocks) = head alignmentGroup
                                                masterBlock = blocks !! masterTimeSeriesI
-                                               alignmentGroup' = map (\(bounds, xs) -> let (init, _:tail) = splitAt masterTimeSeriesI xs
-                                                                                       in (bounds, init ++ tail)) alignmentGroup
+                                               alignmentGroup' = map (\(bounds, xs) -> (bounds, splice masterTimeSeriesI xs)) alignmentGroup
                                            in (masterBlock, alignmentGroup')) groupedAlignments
 
       newBlock = do
@@ -241,6 +242,19 @@ alignBlocks = alignBlocks'
         in liftAssocs blockSpecAssocs
       liftAssocs = map (\(bounds, a) -> (bounds, [a]))
       mergeAlignmentResult = map (\(bounds, x, y) -> (bounds, x ++ y))
+
+forceTimeSeries :: TimeSeries -> GMachine ()
+forceTimeSeries ts = do
+  ctxt <- liftM queryZMQContext getUserState
+
+  liftIO $ forM_ (M.assocs $ tsBlocks ts) $
+       \(blkId, BlockInfo peers) ->
+           let forceCmd = ForceComputation (BlockSpec (tsTableId ts) (tsColumnId ts) blkId)
+               PeerName peer = head peers
+           in sendRequest ctxt (Connect peer) forceCmd $
+              \response -> case response of
+                             Ok -> return ()
+                             x -> fail $ "Bad response returned for ForceComputation: " ++ show x
 
 readTimeSeries :: TimeSeries -> GMachine [(ClockTime, ColumnValue)]
 readTimeSeries ts = do
