@@ -56,7 +56,7 @@ queryApp st [] request = do
   liftIO $ sendRequest (zmqContext st) (Connect "inproc://queries") queryCmd $
       \response ->
         case response of
-          QueryResponse (DoubleResult d) -> ok [contentTypeJson] $ LBS.pack $ J.encode d  --LBS.pack $ show dat
+          QueryResponse (DoubleResult d) -> ok [contentTypeJson] $ LBS.pack $ J.encode d
           QueryResponse (IntResult i) -> ok [contentTypeJson] $ LBS.pack $ J.encode i
           QueryResponse (StringResult t) -> ok [contentTypeJson] $ LBS.pack $ J.encode t
           QueryResponse (TimeSeriesResult tsData) -> do
