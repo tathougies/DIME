@@ -54,7 +54,7 @@ import Text.JSON as JSON
 import Unsafe.Coerce
 
 -- | data type to hold any generic block. There are convenience methods to cast (safely) to specific block types
-data GenericBlock = forall a. BM.BlockMappable a => GenericBlock !RowID !(B.Block a)
+data GenericBlock = forall a. BM.BlockMappable a => GenericBlock !BlockRowID !(B.Block a)
 
 instance Show GenericBlock where
     show (GenericBlock r b) = "GenericBlock " ++ (show r) ++ " " ++ (show b)
@@ -68,7 +68,7 @@ data DataServerState = DataServerState {
       getBlocks :: M.Map BlockSpec GenericBlock,
 
       -- | Maps between a column identifier and a 'DisjointIntervalTree', which keeps track of which rows go in which blocks
-      getRowMappings :: M.Map (TableID, ColumnID) (DIT.DisjointIntervalTree RowID BlockID),
+      getRowMappings :: M.Map (TableID, ColumnID) (DIT.DisjointIntervalTree BlockRowID BlockID),
 
       -- | A list of blocks modified since the last dump
       getModifiedBlocks :: S.Set BlockSpec,
@@ -145,11 +145,11 @@ restoreStateFromChunks state = do
   E.evaluate $ rnf ret -- evaluate fully
   return ret
  where
-    readRowMappings :: JSValue -> [((RowID, RowID), BlockID)]
+    readRowMappings :: JSValue -> [((BlockRowID, BlockRowID), BlockID)]
     readRowMappings (JSArray x) = map readRowMapping x
     readRowMappings _ = error "Bad JSON data type for row mappings"
 
-    readRowMapping :: JSValue -> ((RowID, RowID), BlockID)
+    readRowMapping :: JSValue -> ((BlockRowID, BlockRowID), BlockID)
     readRowMapping (JSObject o) = let mappingData = fromJSObject o
                                       l fieldName = lookup fieldName mappingData
                                   in case (l "range", l "blockId") of
@@ -160,7 +160,7 @@ restoreStateFromChunks state = do
                                         _ -> error "Bad object structure for row mapping"
     readRowMapping _ = error "Bad JSON data type for row mapping"
 
-    readRange :: JSValue -> (RowID, RowID)
+    readRange :: JSValue -> (BlockRowID, BlockRowID)
     readRange (JSObject o) = let rangeData = fromJSObject o
                                  l fieldName = lookup fieldName rangeData
                              in case (l "start", l "end") of
@@ -171,7 +171,7 @@ restoreStateFromChunks state = do
                                   _ -> error "Bad object structure for range"
     readRange _ = error "Bad JSON data type for range"
 
-    parseColumn :: JSObject JSValue -> (TableID, ColumnID, DIT.DisjointIntervalTree RowID BlockID)
+    parseColumn :: JSObject JSValue -> (TableID, ColumnID, DIT.DisjointIntervalTree BlockRowID BlockID)
     parseColumn columnJson = let columnData = fromJSObject columnJson
                                  l fieldName = lookup fieldName columnData
                              in
@@ -207,7 +207,7 @@ restoreStateFromChunks state = do
                in
                  B.update (B.resize blkLength B.empty) blkDataUpdate
 
-    readGenericBlock :: B.ColumnType -> String -> RowID -> GenericBlock
+    readGenericBlock :: B.ColumnType -> String -> BlockRowID -> GenericBlock
     readGenericBlock columnType blkData startRow =
         case columnType of
           B.IntColumn -> GenericBlock startRow $ (readBlock blkData :: B.Block Int)
@@ -219,9 +219,9 @@ getBlockCount st = M.size $ getBlocks st
 
 emptyBlockFromType :: B.ColumnType -> GenericBlock
 emptyBlockFromType columnType = case columnType of
-                                  B.IntColumn -> GenericBlock (RowID 0) (B.empty :: B.Block Int)
-                                  B.StringColumn -> GenericBlock (RowID 0) (B.empty :: B.Block String)
-                                  B.DoubleColumn -> GenericBlock (RowID 0) (B.empty :: B.Block Double)
+                                  B.IntColumn -> GenericBlock (BlockRowID 0) (B.empty :: B.Block Int)
+                                  B.StringColumn -> GenericBlock (BlockRowID 0) (B.empty :: B.Block String)
+                                  B.DoubleColumn -> GenericBlock (BlockRowID 0) (B.empty :: B.Block Double)
 
 -- | Insert the block but also insert the column into the table
 insertBlock :: BlockSpec -> GenericBlock -> DataServerState -> DataServerState
@@ -254,7 +254,7 @@ hasColumn tableId columnId DataServerState { getTables = tables } =
          Nothing -> error "Table not found"
          Just columnSet -> S.member columnId columnSet
 
-hasRow :: TableID -> ColumnID -> RowID -> DataServerState -> Bool
+hasRow :: TableID -> ColumnID -> BlockRowID -> DataServerState -> Bool
 hasRow tableId columnId rowId DataServerState { getRowMappings = rowMappings} =
     let rowMappingResult = M.lookup (tableId, columnId) rowMappings
     in case rowMappingResult of
@@ -273,7 +273,7 @@ deleteBlock blockSpec@(BlockSpec tableId columnId _) s =
 
 -- | Updates the rows in the given column with the given values. The rows must be sorted, and
 -- | The columns must have the correct type or bad things will happen!
-updateRows :: TableID -> ColumnID -> [RowID] -> [B.ColumnValue] -> DataServerState -> DataServerState
+updateRows :: TableID -> ColumnID -> [BlockRowID] -> [B.ColumnValue] -> DataServerState -> DataServerState
 updateRows tableId columnId rowIds values state =
     let Just rowMappings = M.lookup (tableId, columnId) $ getRowMappings state
         idsAndValues = zip rowIds values
@@ -296,9 +296,9 @@ updateRows tableId columnId rowIds values state =
               st { getBlocks = M.adjust (modifyGenericBlock id applyUpdate) (BlockSpec tableId columnId blockId) $ getBlocks st,
                    getModifiedBlocks = S.insert blockSpec $ getModifiedBlocks st }
     in
-      foldr updateBlock state (blockUpdateDescrs :: [[ (RowID, B.ColumnValue)]])
+      foldr updateBlock state (blockUpdateDescrs :: [[ (BlockRowID, B.ColumnValue)]])
 
-fetchColumnForRow :: TableID -> ColumnID -> RowID -> DataServerState -> B.ColumnValue
+fetchColumnForRow :: TableID -> ColumnID -> BlockRowID -> DataServerState -> B.ColumnValue
 fetchColumnForRow tableId columnId rowId state =
     let Just rowMapping = M.lookup (tableId, columnId) $ getRowMappings state
         Just blockId = DIT.lookup rowId rowMapping
@@ -311,7 +311,7 @@ getBlockInfo blockSpec DataServerState {getBlocks = blocks} =
     let block = fromJust $ M.lookup blockSpec blocks
         firstRow = genericFirstRow block
     in
-      BI.empty { firstRow = firstRow, lastRow = firstRow + (fromIntegral $ genericLength block) - RowID 1,
+      BI.empty { firstRow = firstRow, lastRow = firstRow + (fromIntegral $ genericLength block) - BlockRowID 1,
                  blockType = B.typeRepToColumnType $ genericTypeOf block
                }
 
@@ -348,13 +348,13 @@ mapServerBlock op inputs output@(BlockSpec tableId columnId blockId) state =
                  Nothing -> Nothing
                  Just newBlock' ->
                      let state' = insertBlock output newBlock' state
-                         state'' = establishRowMapping (tableId, columnId) (firstRow, firstRow + RowID (fromIntegral $ genericLength newBlock')) blockId state'
+                         state'' = establishRowMapping (tableId, columnId) (firstRow, firstRow + BlockRowID (fromIntegral $ genericLength newBlock')) blockId state'
                      in Just state''
        else Nothing
 
-establishRowMapping :: (TableID, ColumnID) -> (RowID, RowID) -> BlockID -> DataServerState -> DataServerState
+establishRowMapping :: (TableID, ColumnID) -> (BlockRowID, BlockRowID) -> BlockID -> DataServerState -> DataServerState
 establishRowMapping blockKey bounds blockId st@(DataServerState {getRowMappings = rowMappings}) =
-    let updateRowMapping :: Maybe (DIT.DisjointIntervalTree RowID BlockID) -> Maybe (DIT.DisjointIntervalTree RowID BlockID)
+    let updateRowMapping :: Maybe (DIT.DisjointIntervalTree BlockRowID BlockID) -> Maybe (DIT.DisjointIntervalTree BlockRowID BlockID)
         updateRowMapping value = let tree = maybe DIT.empty id value
                                  in Just $ DIT.insert bounds blockId tree
         rowMapping' = M.alter updateRowMapping blockKey rowMappings
@@ -366,7 +366,7 @@ genericLength = withGenericBlock B.length
 genericTypeOf :: GenericBlock -> TypeRep
 genericTypeOf = withGenericBlock (\x -> typeOf $ x #! 0)
 
-genericFirstRow :: GenericBlock -> RowID
+genericFirstRow :: GenericBlock -> BlockRowID
 genericFirstRow (GenericBlock r _) = r
 
 withGenericBlock :: (forall a. BM.BlockMappable a => B.Block a -> b) ->  GenericBlock -> b
@@ -389,7 +389,7 @@ genericCoerceString block
 
 -- | Apply transformation functions on the fields of a generic block
 --   Captures type variables, so it makes the type system happy
-modifyGenericBlock :: (RowID -> RowID) -> (forall a. BM.BlockMappable a => B.Block a -> B.Block a) -> GenericBlock -> GenericBlock
+modifyGenericBlock :: (BlockRowID -> BlockRowID) -> (forall a. BM.BlockMappable a => B.Block a -> B.Block a) -> GenericBlock -> GenericBlock
 modifyGenericBlock rowIndexF dataF (GenericBlock r b) = GenericBlock (rowIndexF r) (dataF b)
 
 dumpState :: TVar DataServerState -> IO ()

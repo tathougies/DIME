@@ -33,11 +33,11 @@ newtype QueryKey = QueryKey Int64
     deriving (Show, Read, Ord, Eq, Num, Enum, JSON, Binary)
 
 -- | Represents a data node command
-data Command = UpdateRows TableID [RowID] [ColumnID] [[ColumnValue]] |
-               FetchRows TableID [(RowID,  RowID)] [ColumnID] |
+data Command = UpdateRows TableID [BlockRowID] [ColumnID] [[ColumnValue]] |
+               FetchRows TableID [(BlockRowID,  BlockRowID)] [ColumnID] |
 
                -- Block commands
-               NewBlock BlockSpec RowID RowID ColumnType |
+               NewBlock BlockSpec BlockRowID BlockRowID ColumnType |
                DeleteBlock BlockSpec |
                BlockInfo BlockSpec |
 

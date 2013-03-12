@@ -86,8 +86,8 @@ data ColumnData = ColumnData {
       getColumnId :: ColumnID,
       getColumnType :: B.ColumnType,
       getBlocks :: Map.Map BlockID BlockData,
-      getAllocatedBlocks :: DIT.DisjointIntervalTree Int64 BlockID,
-      getBlockRanges :: DIT.DisjointIntervalTree Int64 BlockID
+      getBlockRanges :: DIT.DisjointIntervalTree BlockRowID BlockID,
+      getRowMappings :: DIT.DisjointIntervalTree Int64 BlockRowID -- Maintains row id to block-evel index mapping
     } deriving Show
 
 type Column = TVar ColumnData
@@ -98,7 +98,8 @@ data TimeSeriesData = TimeSeriesData {
       getLength :: TimeSeriesIx,
       getColumns :: Map.Map ColumnName Column,
       getStartTime :: ClockTime,
-      getDataFrequency :: Int64
+      getDataFrequency :: Int64,
+      getMaxNullTime :: Maybe Int64
     }
 
 type TimeSeries = TVar TimeSeriesData
@@ -178,12 +179,12 @@ newServerState configLocation = do
         let timeSeriesData = fromJSObject timeSeriesData'
             l fieldName = lookup fieldName timeSeriesData
         in
-          case (l "name", l "tableId", l "length", l "columns", l "startTime", l "dataFrequency") of
+          case (l "name", l "tableId", l "length", l "columns", l "startTime", l "dataFrequency", l "maxNullTime") of
             (Just nameD, Just tableIdD, Just lengthD, Just columnsD, Just startTimeD,
-                  Just dataFrequencyD) ->
+                  Just dataFrequencyD, Just maxNullTimeD) ->
                 case (readJSON nameD, readJSON tableIdD, readJSON lengthD, readJSON columnsD,
-                      readJSON startTimeD, readJSON dataFrequencyD) of
-                  (Ok name, Ok tableId, Ok length, Ok (JSObject columns), Ok startTime, Ok dataFrequency) ->
+                      readJSON startTimeD, readJSON dataFrequencyD, readJSON maxNullTimeD) of
+                  (Ok name, Ok tableId, Ok length, Ok (JSObject columns), Ok startTime, Ok dataFrequency, Ok maxNullTime') ->
                       do
                         columnsData <- mapM
                                            (\(name, column) -> do
@@ -197,7 +198,12 @@ newServerState configLocation = do
                                                       var <- atomically $ newTVar $ columnData
                                                       return $ (ColumnName $ fromString name, var)) $ fromJSObject columns
                         let columnsMap = Map.fromList columnsData
-                        return $ Ok $ TimeSeriesData name tableId length columnsMap startTime dataFrequency
+                        maxNullTime <- case maxNullTime' of
+                                         JSNull -> return (Nothing :: Maybe Int64)
+                                         _ -> case readJSON maxNullTime' of
+                                                Ok x -> return (Just x)
+                                                _ -> fail "Bad data type for maxNullTime"
+                        return $ Ok $ TimeSeriesData name tableId length columnsMap startTime dataFrequency maxNullTime
                   _ -> return $ Error "Bad data types for TimeSeriesData"
             _ -> return $ Error "Bad object structure for TimeSeriesData"
     parseSeriesData _ = return $ Error "Bad format for TimeSeriesData"
@@ -225,8 +231,8 @@ rebuildTimeSeriesMap state = do
             encode timeSeriessData
   return ()
 
-newTimeSeries :: TimeSeriesName -> Int64 -> State -> IO TimeSeries
-newTimeSeries name frequency state@(ServerState { timeSeriessRef = timeSeriessRef }) =
+newTimeSeries :: TimeSeriesName -> Int64 -> Maybe Int64 -> State -> IO TimeSeries
+newTimeSeries name frequency maxNullTime state@(ServerState { timeSeriessRef = timeSeriessRef }) =
     do
       localTime <- getClockTime
       timeSeriesRet <- atomically $ do
@@ -240,7 +246,7 @@ newTimeSeries name frequency state@(ServerState { timeSeriessRef = timeSeriessRe
                                                              maximumBy (comparing getTableId)) $
                                                       mapM readTVar $ Map.elems timeSeriess
                                       let newId = maxId + (TableID 1)
-                                      timeSeries <- newTimeSeries' name newId frequency localTime
+                                      timeSeries <- newTimeSeries' name newId frequency localTime maxNullTime
                                       let timeSeriess' = Map.insert name timeSeries timeSeriess -- add to map
                                       writeTVar timeSeriessRef timeSeriess'
                                       return timeSeries
@@ -250,8 +256,8 @@ newTimeSeries name frequency state@(ServerState { timeSeriessRef = timeSeriessRe
 
       return timeSeriesRet
     where
-      newTimeSeries' name tableId frequency localTime =
-          newTVar $ TimeSeriesData name tableId 0 Map.empty localTime frequency
+      newTimeSeries' name tableId frequency localTime maxNullTime =
+          newTVar $ TimeSeriesData name tableId 0 Map.empty localTime frequency maxNullTime
 
 newColumn :: TimeSeriesName -> ColumnName -> B.ColumnType -> State -> IO Column
 newColumn tsName name columnType state =
@@ -353,22 +359,38 @@ appendRow timeSeriesName columnsAndValues state =
         Nothing -> return Nothing
     where
       appendColumnInRow :: State -> TimeSeries -> Int64 -> MVar Bool -> (ColumnName, B.ColumnValue) -> IO ()
-      appendColumnInRow state timeSeries rowIndex signalVar (columnName, columnValue) =
+      appendColumnInRow state timeSeries tsRowIndex signalVar (columnName, columnValue) =
           do
-            infoM moduleName $ "Appending column in row " ++ show rowIndex
+            infoM moduleName $ "Appending column in row " ++ show tsRowIndex
             let context = zmqContext state
             -- Figure out if new blocks need to be allocated, and dispatch the appropriate request to the appropriate server
             timeSeriesData <- readTVarIO timeSeries
             let column = fromJust $ Map.lookup columnName $ getColumns timeSeriesData
 
             columnData <- readTVarIO column
-            let blockRanges = getBlockRanges columnData
-                allocatedBlocks = getAllocatedBlocks columnData
+            let rowMappings = getRowMappings columnData
+                blockRanges = getBlockRanges columnData
                 blocks = getBlocks columnData
                 tableId = getTableId timeSeriesData
                 columnId = getColumnId columnData
 
-            (blockId, blockData) <- case DIT.lookup rowIndex allocatedBlocks of
+            -- go from a time series-level index to a block-level index. The spanKey and spanRowBase will be added to block ranges, if the row is added successfully
+            (newSpanInfo, rowIndex) <- case DIT.lookupWithLeftBound tsRowIndex rowMappings of
+                          Just (tsRowBase, blockRowBase) -> return (Nothing, (fromIntegral $ tsRowIndex - tsRowBase) + blockRowBase)
+                          Nothing -> do -- check to see if this should go at the end of the time series
+                            let (_, upperBound) = if DIT.null rowMappings then (0, 0) else DIT.bounds rowMappings
+                                timeSinceLastInsert = (tsRowIndex - upperBound) * (getDataFrequency timeSeriesData)
+
+                                (lastTSRowBase, lastBlockRowBase) = if DIT.null rowMappings then (0, 0) else fromJust $ DIT.lookupWithLeftBound (pred upperBound) rowMappings
+                                nextAvailableBlockRowBase = (fromIntegral $ upperBound - lastTSRowBase) + lastBlockRowBase -- get the next available position in the block (where a new span would start)
+                            when (timeSinceLastInsert < 0) $ fail "Cannot update value inside a null span" -- attempt to insert a value inside an already-existing time series
+                            if (isJust $ getMaxNullTime timeSeriesData) && timeSinceLastInsert > (fromJust $ getMaxNullTime timeSeriesData) then
+                               -- create a new span
+                               return (Just ((tsRowIndex, succ tsRowIndex), nextAvailableBlockRowBase), nextAvailableBlockRowBase)
+                             else
+                               return (Just ((upperBound, succ tsRowIndex), lastBlockRowBase), (fromIntegral $ tsRowIndex - lastTSRowBase) + lastBlockRowBase)
+
+            (blockId, blockData) <- case DIT.lookup rowIndex blockRanges of
                            Just x -> return (x, fromJust $ Map.lookup x blocks) -- We found the block, send the add message and continue
                            Nothing -> do
                              bestPeerRes <- calculateBestPeer state columnData
@@ -389,7 +411,7 @@ appendRow timeSeriesName columnsAndValues state =
                                                     (\columnData ->
                                                          columnData {
                                                            getBlocks = Map.insert newBlockId newBlockData $ getBlocks columnData,
-                                                           getAllocatedBlocks = DIT.insert (startRowId, endRowId) newBlockId $ getAllocatedBlocks columnData
+                                                           getBlockRanges = DIT.insert (startRowId, endRowId) newBlockId $ getBlockRanges columnData
                                                          })
 
                                                 return (newBlockId, newBlockData)
@@ -400,24 +422,27 @@ appendRow timeSeriesName columnsAndValues state =
             -- Now send a message out to each owner adding the value
             results <- forM (getOwners blockData)
                   (\(PeerName peer) ->
-                       let appendCmd = UpdateRows tableId [RowID $ fromIntegral rowIndex] [columnId] [[columnValue]]
+                       let appendCmd = UpdateRows tableId [BlockRowID $ fromIntegral rowIndex] [columnId] [[columnValue]]
                        in sendRequest context (Connect peer) appendCmd $
                           (return . not . isFailure)
                   )
             if (all id results)
              then do
                -- The addition was successful, we update the column correspondingly
-               atomically $ modifyTVar' column
+               case newSpanInfo of
+                 Just (spanKey, spanRowBase) ->
+                     atomically $ modifyTVar' column
                           (\columnData ->
-                               columnData { getBlockRanges = DIT.insert (rowIndex, succ rowIndex) blockId $ getBlockRanges columnData })
+                               columnData { getRowMappings = DIT.insert spanKey spanRowBase $ getRowMappings columnData })
+                 Nothing -> return ()
                putMVar signalVar True
              else putMVar signalVar False -- failure :(
             return ()
 
-      createBlockOnPeer :: MonadTransport m => Context m -> PeerName -> TableID -> ColumnID -> BlockID -> Int64 -> B.ColumnType -> m (Int64, Int64)
+      createBlockOnPeer :: MonadTransport m => Context m -> PeerName -> TableID -> ColumnID -> BlockID -> Int64 -> B.ColumnType -> m (BlockRowID, BlockRowID)
       createBlockOnPeer ctxt (PeerName peer) tableId columnId blockId rowId columnType =
-          let beginRowId = RowID $ rowId - rowId `mod` blockSize
-              endRowId = beginRowId + (RowID blockSize)
+          let beginRowId = BlockRowID $ rowId - rowId `mod` blockSize
+              endRowId = beginRowId + (BlockRowID blockSize)
               newBlockCommand = NewBlock (BlockSpec tableId columnId blockId) beginRowId endRowId columnType
           in sendRequest ctxt (Connect peer) newBlockCommand $
              (\(response :: Response) -> do
@@ -478,7 +503,10 @@ timeSeriesAsJSValue tsVar = do
                              ("length", showJSON $ getLength ts),
                              ("columns", showJSON $ columns),
                              ("startTime", showJSON $ getStartTime ts),
-                             ("dataFrequency", showJSON $ getDataFrequency ts)
+                             ("dataFrequency", showJSON $ getDataFrequency ts),
+                             ("maxNullTime", showJSON $ case getMaxNullTime ts of
+                                                          Nothing -> JSNull
+                                                          Just nullTime -> showJSON nullTime)
                             ]
 
 columnAsJSON :: IsString a => Column -> STM a
@@ -545,20 +573,20 @@ instance JSON ColumnData where
                           ("columnId", showJSON $ getColumnId x),
                           ("type", showJSON $ getColumnType x),
                           ("blocks", showJSON $ getBlocks x),
-                          ("ranges", showJSON $ getBlockRanges x),
-                          ("allocatedBlocks", showJSON $ getAllocatedBlocks x)
+                          ("rowMappings", showJSON $ getRowMappings x),
+                          ("blockRanges", showJSON $ getBlockRanges x)
                          ]
     readJSON (JSObject objData') =
         let objData = fromJSObject objData'
             l fieldName = lookup fieldName objData -- some shorthand
         in
-          case (l "name", l "columnId", l "blocks", l "type", l "allocatedBlocks", l "ranges") of
-            (Just nameD, Just columnIdD, Just blocksD, Just typeD, Just allocatedBlocksD,
-             Just blockRangesD) ->
+          case (l "name", l "columnId", l "blocks", l "type", l "blockRanges", l "rowMappings") of
+            (Just nameD, Just columnIdD, Just blocksD, Just typeD, Just blockRangesD,
+             Just rowMappingsD) ->
                 case (readJSON nameD, readJSON columnIdD, readJSON blocksD, readJSON typeD,
-                      readJSON allocatedBlocksD, readJSON blockRangesD) of
-                  (Ok name, Ok columnId, Ok blocks, Ok columnType, Ok allocatedBlocks, Ok blockRanges) ->
-                      Ok $ ColumnData name columnId columnType blocks allocatedBlocks blockRanges
+                      readJSON blockRangesD, readJSON rowMappingsD) of
+                  (Ok name, Ok columnId, Ok blocks, Ok columnType, Ok blockRanges, Ok rowMappings) ->
+                      Ok $ ColumnData name columnId columnType blocks blockRanges rowMappings
                   _ -> Error "Bad types for ColumnData"
             _ -> Error "Bad object structure for ColumnData"
     readJSON _ = Error "Bad format for ColumnData"

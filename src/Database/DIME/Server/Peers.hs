@@ -52,7 +52,8 @@ data PeerResponse = Ok | InfoRequest |
                         columnName :: ColumnName,
                         columnId :: ColumnID,
                         blocks :: [(BlockID, [PeerName])],
-                        rowMappings :: [((Int64, Int64), BlockID)]}
+                        blockRanges :: [((BlockRowID, BlockRowID), BlockID)],
+                        rowMappings :: [((Int64, Int64), BlockRowID)]}
 
 -- | The peer server. This runs on the main server and keeps track of the peer state.
 peerServer :: State -> IO ()
@@ -109,11 +110,13 @@ peerServer serverState = do
                   column <- readTVar cVar
                   let blocks = Map.assocs $ getBlocks column
                       blocks' = map (\(bId, bData) -> (bId, getOwners bData)) blocks
-                      rowMappings = DIT.assocs $ getBlockRanges column
+                      rowMappings = DIT.assocs $ getRowMappings column
+                      blockRanges = DIT.assocs $ getBlockRanges column
                   return $ TimeSeriesColumnInfoResponse {
                                columnName = getColumnName column,
                                columnId = getColumnId column,
                                blocks = blocks',
+                               blockRanges = blockRanges,
                                rowMappings = rowMappings}
 
     doTimeSeriesInfo tsName serverState = atomically $ do
@@ -187,6 +190,7 @@ instance Binary PeerResponse where
            columnName <- get
            columnId <- get
            blocks <- get
+           blockRanges <- get
            rowMappings <- get
            return $ TimeSeriesColumnInfoResponse {..}
     put Ok = put (1 :: Int8)
@@ -205,4 +209,5 @@ instance Binary PeerResponse where
         put columnName
         put columnId
         put blocks
+        put blockRanges
         put rowMappings

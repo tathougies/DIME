@@ -54,7 +54,11 @@ timeSeriesApp state timeSeriesName path request =
             case lookup "frequency" queryVars of
               Just (Just frequency) ->
                   do
-                    timeSeries <- liftIO $ newTimeSeries timeSeriesName (read $ BS.unpack frequency) state
+                    let maxNullTime = case lookup "maxNullTime" queryVars of
+                                        Just Nothing -> Nothing
+                                        Nothing -> Nothing
+                                        Just (Just x) -> Just (read $ BS.unpack x)
+                    timeSeries <- liftIO $ newTimeSeries timeSeriesName (read $ BS.unpack frequency) maxNullTime state
                     jsonRepr <- atomicallyR $ timeSeriesAsJSON timeSeries -- Create new time series, and display the information
                     ok [contentTypeJson] jsonRepr
               _ -> badRequest

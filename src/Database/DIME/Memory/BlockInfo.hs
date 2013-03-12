@@ -7,13 +7,13 @@ import Database.DIME
 
 import Data.Binary
 
-data BlockInfo = BlockInfo { firstRow :: RowID,
-                             lastRow :: RowID,
+data BlockInfo = BlockInfo { firstRow :: BlockRowID,
+                             lastRow :: BlockRowID,
                              blockType :: ColumnType
                            }
                deriving (Show, Eq)
 
-empty = BlockInfo (RowID 0) (RowID 0) (error "Unspecified column type")
+empty = BlockInfo (BlockRowID 0) (BlockRowID 0) (error "Unspecified column type")
 
 instance Binary BlockInfo where
     put bi = do

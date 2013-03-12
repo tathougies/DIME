@@ -35,7 +35,8 @@ module Database.DIME.Flow.Types where
       tsStartTime :: ClockTime,
       tsFrequency :: Int64,
       tsBlocks :: M.Map BlockID BlockInfo,
-      tsRowMappings :: DIT.DisjointIntervalTree RowID BlockID}
+      tsBlockRanges :: DIT.DisjointIntervalTree BlockRowID BlockID,
+      tsRowMappings :: DIT.DisjointIntervalTree RowID BlockRowID}
      deriving Show
 
     data TimeSeriesCollection = TimeSeriesCollection {

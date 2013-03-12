@@ -180,7 +180,7 @@ dataServerMain coordinatorName localAddress = do
                \s -> loop s c coordinatorServerName stateVar -- Run loop once (it creates more listeners as it moves)
         atomically $ modifyTVar threadsRef (S.delete threadId)
 
-    expandRowIds regions = concatMap (\(x, y) -> [x..(y - RowID 1)]) regions
+    expandRowIds regions = concatMap (\(x, y) -> [x..(y - BlockRowID 1)]) regions
 
     loop s c coordinatorName stateVar = do
       serveRequest s (return ()) $
