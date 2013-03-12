@@ -1,13 +1,16 @@
-{-# LANGUAGE TemplateHaskell, BangPatterns #-}
+{-# LANGUAGE TemplateHaskell, BangPatterns, CPP #-}
 module Data.Tree.DisjointIntervalTree
     (DisjointIntervalTree,
-     empty, lookup, keys, assocs, elems,
+     null, empty, lookup, lookupWithLeftBound, keys, assocs, elems, bounds,
      insert, delete,
-     fromList,
-     runAllTests)
+     fromList
+#ifdef INCLUDE_TESTS
+     , runAllTests
+#endif
+    )
     where
 
-import Prelude hiding (filter, map, lookup, foldr)
+import Prelude hiding (filter, map, lookup, foldr, null)
 import qualified Prelude as P
 import Data.Maybe
 
@@ -25,6 +28,10 @@ instance (Ord k, Eq v, NFData k, NFData v) => NFData (DisjointIntervalTree k v) 
 
 empty :: DisjointIntervalTree k v
 empty = Tip
+
+null :: DisjointIntervalTree k v -> Bool
+null Tip = True
+null _ = False
 
 key :: (Ord k, Eq v) => DisjointIntervalTree k v -> k
 key Tip = error "Tried to get key of tip"
@@ -89,6 +96,13 @@ lookup :: (Ord k, Eq v) => k -> DisjointIntervalTree k v -> Maybe v
 lookup key tree = case lookupNode key tree of
                       Nothing -> Nothing
                       Just x -> value x
+
+lookupWithLeftBound :: (Ord k, Eq v) => k -> DisjointIntervalTree k v -> Maybe (k, v)
+lookupWithLeftBound k tree = case lookupNode k tree of
+                              Nothing -> Nothing
+                              Just x -> case value x of
+                                          Nothing -> Nothing
+                                          Just val -> Just (key x, val)
 
 delete :: (Ord k, Eq v) => (k, k) -> DisjointIntervalTree k v -> DisjointIntervalTree k v
 delete !bounds tree = insertInBounds bounds Nothing tree
@@ -291,7 +305,9 @@ prop_testAssocs base offsets values =
         calcExpAssocs [] = []
     in ((assocs dit) == valuedAssocs)
 
+#ifdef INCLUDE_TESTS
 runAllTests = $quickCheckAll
+#endif
 
 instance (Arbitrary k, Arbitrary v, Num k, Ord k, Eq v) => Arbitrary (DisjointIntervalTree k v) where
     arbitrary = sized tree'
