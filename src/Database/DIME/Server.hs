@@ -88,7 +88,7 @@ dumpStatePeriodically state = forever $ do
                                 threadDelay dumpDelay
                                 rebuildTimeSeriesMap state
 
-queryDistributor :: Context -> IO () -- receives query requests and forwards them on to some node to handle them
+queryDistributor :: Context IO -> IO () -- receives query requests and forwards them on to some node to handle them
 queryDistributor c = do
   infoM moduleName $ "Query broker starting..."
   safelyWithSocket c Router (Bind "inproc://queries") $ \routerS ->

@@ -107,7 +107,7 @@ data State = ServerState {
       configLocation :: FilePath,
       timeSeriessRef :: TVar (Map.Map TimeSeriesName TimeSeries),
       peersRef :: TVar PeersInfo,
-      zmqContext :: Context
+      zmqContext :: Context IO
     }
 
 calcMeanBlockCount :: Floating a => PeersInfo -> IO a
@@ -414,7 +414,7 @@ appendRow timeSeriesName columnsAndValues state =
              else putMVar signalVar False -- failure :(
             return ()
 
-      createBlockOnPeer :: Context -> PeerName -> TableID -> ColumnID -> BlockID -> Int64 -> B.ColumnType -> IO (Int64, Int64)
+      createBlockOnPeer :: MonadTransport m => Context m -> PeerName -> TableID -> ColumnID -> BlockID -> Int64 -> B.ColumnType -> m (Int64, Int64)
       createBlockOnPeer ctxt (PeerName peer) tableId columnId blockId rowId columnType =
           let beginRowId = RowID $ rowId - rowId `mod` blockSize
               endRowId = beginRowId + (RowID blockSize)
@@ -422,7 +422,7 @@ appendRow timeSeriesName columnsAndValues state =
           in sendRequest ctxt (Connect peer) newBlockCommand $
              (\(response :: Response) -> do
                   when (isFailure response) $
-                       warningM moduleName ("Failed creating block " ++ show blockId ++ " on " ++ peer)
+                       liftIO $ warningM moduleName ("Failed creating block " ++ show blockId ++ " on " ++ peer)
                   return (fromIntegral beginRowId, fromIntegral endRowId))
 
       calculateBestPeer :: State -> ColumnData -> IO (Maybe PeerName)

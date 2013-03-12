@@ -51,11 +51,11 @@ module Database.DIME.Flow.Types where
     data QueryState = QueryState {
                           queryKey :: QueryKey,
                           queryServerName :: String,
-                          queryZMQContext :: Context
+                          queryZMQContext :: Context IO
                       }
                 deriving Typeable
 
-    getZMQContext :: GMachine Context
+    getZMQContext :: GMachine (Context IO)
     getZMQContext = do
       userState <- liftM gmachineUserState get
       let queryState = fromDyn userState (error "Bad state for DIME GMachine") :: QueryState
