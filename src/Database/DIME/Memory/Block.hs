@@ -76,6 +76,9 @@ class (Show s, Read s, Binary s, Typeable s, JSON s, NFData (Block s)) => BlockS
         | (Database.DIME.Memory.Block.length block) > newSize = slice 0 newSize block -- Slice
         | otherwise = block
 
+    forceCompute :: Block s -> Block s
+    forceCompute x = x -- for future
+
 instance BlockStorable [Char] where
     newtype Block [Char] = StringStorage (A.Array Int [Char])
 

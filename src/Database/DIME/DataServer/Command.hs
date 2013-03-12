@@ -18,7 +18,7 @@ import Language.Flow.Execution.Types -- for Binary Text intance
 
 import Text.JSON
 
-updateRowsTag, fetchRowsTag, newBlockTag, deleteBlockTag, blockInfoTag, mapTag, runQueryTag :: Int8
+updateRowsTag, fetchRowsTag, newBlockTag, deleteBlockTag, blockInfoTag, mapTag, runQueryTag, forceComputationTag :: Int8
 runQueryTag = 0
 updateRowsTag = 1
 fetchRowsTag = 2
@@ -26,6 +26,7 @@ newBlockTag = 3
 deleteBlockTag = 4
 blockInfoTag = 5
 mapTag = 6
+forceComputationTag = 7
 
 -- | Identifies running queries. Used by nodes to make requests in order to see a consistent state
 newtype QueryKey = QueryKey Int64
@@ -43,6 +44,7 @@ data Command = UpdateRows TableID [RowID] [ColumnID] [[ColumnValue]] |
                TransferBlock BlockSpec BlockSpec String |
 
                Map MapOperation [BlockSpec] BlockSpec |
+               ForceComputation BlockSpec |
                --Calc CalcOperation BlockSpec |
                {-
                Reduce ReduceOperation TableID ColumnID BlockID |
@@ -80,6 +82,9 @@ instance Binary Command where
                           put op
                           put inputs
                           put output
+    put (ForceComputation blockSpec) = do
+                          put forceComputationTag
+                          put blockSpec
     put (RunQuery queryKey progTxt) = do
                           put runQueryTag
                           put queryKey
@@ -95,6 +100,7 @@ instance Binary Command where
         4 {- deleteBlockTag -} -> getDeleteBlock
         5 {- blockInfoTag -} -> getBlockInfo
         6 {- mapTag -} -> getMap
+        7 {- forceComputationTag -} -> getForceComputation
      where
        getRunQuery = do
             queryKey <- get
@@ -124,3 +130,6 @@ instance Binary Command where
             inputs <- get
             output <- get
             return $ Map op inputs output
+       getForceComputation = do
+            blockSpec <- get
+            return $ ForceComputation blockSpec

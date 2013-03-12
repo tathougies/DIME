@@ -33,7 +33,7 @@ import Database.DIME.Util
 import Database.DIME.Transport
 import Database.DIME.Memory.Block
 import Database.DIME.Flow hiding (BlockInfo)
-import Database.DIME.Flow.TimeSeries (isTimeSeries, asTimeSeries, readTimeSeries)
+import Database.DIME.Flow.TimeSeries (isTimeSeries, asTimeSeries, readTimeSeries, forceTimeSeries)
 import Database.DIME.Server.State (PeerName(..))
 
 import GHC.Conc (numCapabilities)
@@ -205,6 +205,8 @@ dataServerMain coordinatorName localAddress = do
                                     doBlockInfo blockSpec state
                                 Map op inputs output ->
                                     doMap op inputs output state
+                                ForceComputation blockSpec ->
+                                    doForceComputation blockSpec state
                     case newState of
                       Just state' -> do
                           writeTVar stateVar state'
@@ -236,7 +238,9 @@ dataServerMain coordinatorName localAddress = do
                  | isString retVal -> return $ QueryResponse $ StringResult $ asString retVal
                  | isDouble retVal -> return $ QueryResponse $ DoubleResult $ asDouble retVal
                  | isTimeSeries retVal -> do
-                            Right (_, tsData) <- runGMachine (readTimeSeries $ asTimeSeries retVal) state
+                            Right (_, tsData) <- let retValD = asTimeSeries retVal
+                                                 in runGMachine (forceTimeSeries retValD >>
+                                                                 readTimeSeries retValD) state
                             return $ QueryResponse $ TimeSeriesResult tsData
                  | otherwise -> return $ Fail "Invalid type returned from query")
             (\(e :: SomeException) -> do
@@ -314,6 +318,11 @@ dataServerMain coordinatorName localAddress = do
                      let blockInfo = ServerState.getBlockInfo output state'
                      in return (MapResponse (BI.blockType blockInfo), Just state')
            else return (BlockDoesNotExist, Nothing)
+
+    doForceComputation blockSpec state =
+        if ServerState.hasBlock blockSpec state then
+            return (Ok, Just $ ServerState.forceCompute blockSpec state)
+        else return (BlockDoesNotExist, Nothing)
 
 {-| Implements a simple client to the server above.
     Commands are entered directly using Haskell read syntax. Responses are parsed

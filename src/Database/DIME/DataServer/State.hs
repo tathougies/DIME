@@ -3,7 +3,7 @@ module Database.DIME.DataServer.State
     ( DataServerState(..), GenericBlock(..),
       mkEmptyServerState,
       emptyBlockFromType, insertBlock, hasBlock,
-      mapServerBlock,
+      mapServerBlock, forceCompute,
       hasTable, hasColumn, hasRow,
       deleteBlock, getBlockInfo, withGenericBlock,
       modifyGenericBlock,
@@ -22,7 +22,8 @@ import Control.DeepSeq
 import Control.Concurrent.STM
 import Control.Monad
 
-import Database.DIME.Memory.Block as B
+import qualified Database.DIME.Memory.Block as B
+import Database.DIME.Memory.Block ((#!))
 import Database.DIME.Memory.BlockInfo as BI
 import Database.DIME.Memory.Operation.Mappable as BM
 import Database.DIME.Memory.Operation.Int ()
@@ -53,7 +54,7 @@ import Text.JSON as JSON
 import Unsafe.Coerce
 
 -- | data type to hold any generic block. There are convenience methods to cast (safely) to specific block types
-data GenericBlock = forall a. BM.BlockMappable a => GenericBlock !RowID !(Block a)
+data GenericBlock = forall a. BM.BlockMappable a => GenericBlock !RowID !(B.Block a)
 
 instance Show GenericBlock where
     show (GenericBlock r b) = "GenericBlock " ++ (show r) ++ " " ++ (show b)
@@ -194,7 +195,7 @@ restoreStateFromChunks state = do
                                _ -> error "Bad object structure for block"
 
 
-    readBlock :: BlockStorable s => String -> Block s
+    readBlock :: B.BlockStorable s => String -> B.Block s
     readBlock blkData =
       let blkDataBs = BS.pack $ map (fromIntegral . ord) blkData
       in case B64.decode blkDataBs of
@@ -204,23 +205,23 @@ restoreStateFromChunks state = do
                    blkLength = L.length blkDataList
                    blkDataUpdate = zip [0..blkLength - 1] blkDataList
                in
-                 update (B.resize blkLength B.empty) blkDataUpdate
+                 B.update (B.resize blkLength B.empty) blkDataUpdate
 
-    readGenericBlock :: ColumnType -> String -> RowID -> GenericBlock
+    readGenericBlock :: B.ColumnType -> String -> RowID -> GenericBlock
     readGenericBlock columnType blkData startRow =
         case columnType of
-          IntColumn -> GenericBlock startRow $ (readBlock blkData :: Block Int)
-          DoubleColumn -> GenericBlock startRow $ (readBlock blkData :: Block Double)
-          StringColumn -> GenericBlock startRow $ (readBlock blkData :: Block String)
+          B.IntColumn -> GenericBlock startRow $ (readBlock blkData :: B.Block Int)
+          B.DoubleColumn -> GenericBlock startRow $ (readBlock blkData :: B.Block Double)
+          B.StringColumn -> GenericBlock startRow $ (readBlock blkData :: B.Block String)
 
 getBlockCount :: DataServerState -> Int
 getBlockCount st = M.size $ getBlocks st
 
 emptyBlockFromType :: B.ColumnType -> GenericBlock
 emptyBlockFromType columnType = case columnType of
-                                  B.IntColumn -> GenericBlock (RowID 0) (B.empty :: Block Int)
-                                  B.StringColumn -> GenericBlock (RowID 0) (B.empty :: Block String)
-                                  B.DoubleColumn -> GenericBlock (RowID 0) (B.empty :: Block Double)
+                                  B.IntColumn -> GenericBlock (RowID 0) (B.empty :: B.Block Int)
+                                  B.StringColumn -> GenericBlock (RowID 0) (B.empty :: B.Block String)
+                                  B.DoubleColumn -> GenericBlock (RowID 0) (B.empty :: B.Block Double)
 
 -- | Insert the block but also insert the column into the table
 insertBlock :: BlockSpec -> GenericBlock -> DataServerState -> DataServerState
@@ -272,7 +273,7 @@ deleteBlock blockSpec@(BlockSpec tableId columnId _) s =
 
 -- | Updates the rows in the given column with the given values. The rows must be sorted, and
 -- | The columns must have the correct type or bad things will happen!
-updateRows :: TableID -> ColumnID -> [RowID] -> [ColumnValue] -> DataServerState -> DataServerState
+updateRows :: TableID -> ColumnID -> [RowID] -> [B.ColumnValue] -> DataServerState -> DataServerState
 updateRows tableId columnId rowIds values state =
     let Just rowMappings = M.lookup (tableId, columnId) $ getRowMappings state
         idsAndValues = zip rowIds values
@@ -285,9 +286,9 @@ updateRows tableId columnId rowIds values state =
                 blockSpec = BlockSpec tableId columnId blockId
                 blockStartIndex = genericFirstRow $ fromJust $ M.lookup blockSpec $ getBlocks st
 
-                rowIdsAndValues' = map (\(x, ColumnValue y) -> (fromIntegral $ x - blockStartIndex, unsafeCoerce y)) rowIdsAndValues
+                rowIdsAndValues' = map (\(x, B.ColumnValue y) -> (fromIntegral $ x - blockStartIndex, unsafeCoerce y)) rowIdsAndValues
 
-                typeCheck block = (typeOf $ block #! 0) == (withColumnValue typeOf firstValue)
+                typeCheck block = (typeOf $ block #! 0) == (B.withColumnValue typeOf firstValue)
 
                 applyUpdate block = if typeCheck block then B.update block rowIdsAndValues' else
                                         error "Incorrect type supplied for block"
@@ -295,15 +296,15 @@ updateRows tableId columnId rowIds values state =
               st { getBlocks = M.adjust (modifyGenericBlock id applyUpdate) (BlockSpec tableId columnId blockId) $ getBlocks st,
                    getModifiedBlocks = S.insert blockSpec $ getModifiedBlocks st }
     in
-      foldr updateBlock state (blockUpdateDescrs :: [[ (RowID, ColumnValue)]])
+      foldr updateBlock state (blockUpdateDescrs :: [[ (RowID, B.ColumnValue)]])
 
-fetchColumnForRow :: TableID -> ColumnID -> RowID -> DataServerState -> ColumnValue
+fetchColumnForRow :: TableID -> ColumnID -> RowID -> DataServerState -> B.ColumnValue
 fetchColumnForRow tableId columnId rowId state =
     let Just rowMapping = M.lookup (tableId, columnId) $ getRowMappings state
         Just blockId = DIT.lookup rowId rowMapping
         Just block = M.lookup (BlockSpec tableId columnId blockId) $ getBlocks state
         offsetIndex = rowId - (genericFirstRow block)
-    in withGenericBlock (\block' -> ColumnValue $ block' #! (fromIntegral offsetIndex)) block
+    in withGenericBlock (\block' -> B.ColumnValue $ block' #! (fromIntegral offsetIndex)) block
 
 getBlockInfo :: BlockSpec -> DataServerState -> BlockInfo
 getBlockInfo blockSpec DataServerState {getBlocks = blocks} =
@@ -313,6 +314,11 @@ getBlockInfo blockSpec DataServerState {getBlocks = blocks} =
       BI.empty { firstRow = firstRow, lastRow = firstRow + (fromIntegral $ genericLength block) - RowID 1,
                  blockType = B.typeRepToColumnType $ genericTypeOf block
                }
+
+forceCompute :: BlockSpec -> DataServerState -> DataServerState
+forceCompute blockSpec st =
+
+    st { getBlocks = M.alter (Just . (modifyGenericBlock id B.forceCompute) . fromJust) blockSpec $ getBlocks st }
 
 mapServerBlock :: MapOperation -> [BlockSpec] -> BlockSpec -> DataServerState -> Maybe DataServerState
 mapServerBlock op [] _ state = Nothing
@@ -363,27 +369,27 @@ genericTypeOf = withGenericBlock (\x -> typeOf $ x #! 0)
 genericFirstRow :: GenericBlock -> RowID
 genericFirstRow (GenericBlock r _) = r
 
-withGenericBlock :: (forall a. BM.BlockMappable a => Block a -> b) ->  GenericBlock -> b
+withGenericBlock :: (forall a. BM.BlockMappable a => B.Block a -> b) ->  GenericBlock -> b
 withGenericBlock f (GenericBlock _ b) = f b
 
-genericCoerceInt :: GenericBlock -> Maybe (Block Int)
+genericCoerceInt :: GenericBlock -> Maybe (B.Block Int)
 genericCoerceInt block
     | genericTypeOf block == typeOf (undefined :: Int) = Just $ withGenericBlock unsafeCoerce block
     | otherwise = Nothing
 
-genericCoerceDouble :: GenericBlock -> Maybe (Block Double)
+genericCoerceDouble :: GenericBlock -> Maybe (B.Block Double)
 genericCoerceDouble block
     | genericTypeOf block == typeOf (undefined :: Double) = Just $ withGenericBlock unsafeCoerce block
     | otherwise = Nothing
 
-genericCoerceString :: GenericBlock -> Maybe (Block String)
+genericCoerceString :: GenericBlock -> Maybe (B.Block String)
 genericCoerceString block
     | genericTypeOf block == typeOf (undefined :: String) = Just $ withGenericBlock unsafeCoerce block
     | otherwise = Nothing
 
 -- | Apply transformation functions on the fields of a generic block
 --   Captures type variables, so it makes the type system happy
-modifyGenericBlock :: (RowID -> RowID) -> (forall a. BM.BlockMappable a => Block a -> Block a) -> GenericBlock -> GenericBlock
+modifyGenericBlock :: (RowID -> RowID) -> (forall a. BM.BlockMappable a => B.Block a -> B.Block a) -> GenericBlock -> GenericBlock
 modifyGenericBlock rowIndexF dataF (GenericBlock r b) = GenericBlock (rowIndexF r) (dataF b)
 
 dumpState :: TVar DataServerState -> IO ()
@@ -415,7 +421,7 @@ dumpState stateVar = do
   forM updatedBlocks $ -- write out updated block data
        (\(updatedBlockSpec@(BlockSpec tableId columnId blockId), updatedBlock) -> do
             let fileName = blockFileName chunkDir updatedBlockSpec
-                blockData = withGenericBlock (Bin.encode . toList) updatedBlock
+                blockData = withGenericBlock (Bin.encode . B.toList) updatedBlock
                 blockDataTxt = B64.encode $ BS.concat $ LBS.toChunks $ GZip.compress $ blockData
 
                 endRow =  (fromIntegral $ genericFirstRow updatedBlock) + genericLength updatedBlock - 1
@@ -426,7 +432,7 @@ dumpState stateVar = do
                             ("startRow", showJSON $ genericFirstRow updatedBlock),
                             ("endRow", showJSON endRow),
                             ("data", showJSON blockDataTxt),
-                            ("type", showJSON $ typeRepToColumnType $ genericTypeOf updatedBlock)
+                            ("type", showJSON $ B.typeRepToColumnType $ genericTypeOf updatedBlock)
                            ]
 
                 serializedJSON = JSON.encode $ jsonData
