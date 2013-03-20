@@ -2,7 +2,7 @@
 module Data.Tree.DisjointIntervalTree
     (DisjointIntervalTree,
      null, empty, lookup, lookupWithLeftBound, keys, assocs, elems, bounds,
-     insert, delete,
+     insert, delete, size,
      fromList
 #ifdef INCLUDE_TESTS
      , runAllTests
@@ -52,9 +52,14 @@ right (Tree _ _ _ _ r) = r
 keys :: (Ord k, Eq v) => DisjointIntervalTree k v -> [(k, k)]
 keys Tip = []
 keys (Tree _ _ _ Tip Tip) = []
-keys (Tree ourKey _ _ leftChild Tip) = (keys leftChild) ++ [(key leftChild, ourKey)]
+keys (Tree ourKey _ _ leftChild Tip) = (keys leftChild) ++ [(key $ maxNode leftChild, ourKey)]
 keys (Tree ourKey _ _ Tip rightChild) = [(ourKey, key rightChild)] ++ (keys rightChild)
-keys (Tree ourKey _ _ leftChild rightChild) = (keys leftChild) ++ [(key leftChild, ourKey), (ourKey, key rightChild)] ++ (keys rightChild)
+keys (Tree ourKey _ _ leftChild rightChild) = (keys leftChild) ++ [(key $ maxNode leftChild, ourKey), (ourKey, key $ minNode rightChild)] ++ (keys rightChild)
+
+size :: (Ord k, Eq v) => DisjointIntervalTree k v -> Int
+size Tip = 0
+size (Tree _ _ Nothing leftChild rightChild) = (size leftChild) + (size rightChild)
+size (Tree _ _ (Just _) leftChild rightChild) = (size leftChild) + 1 + (size rightChild)
 
 elems :: (Ord k, Eq v) => DisjointIntervalTree k v -> [v]
 elems Tip = []

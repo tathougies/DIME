@@ -1,7 +1,11 @@
 module Database.DIME.Util where
 
+import Prelude hiding (catch)
 import Control.Monad
+import Control.Concurrent
 import Control.Concurrent.STM
+import Control.Concurrent.MVar
+import Control.Exception
 
 import Data.Maybe
 
@@ -29,3 +33,17 @@ mapMaybeM f (x:xs) = do
 splice :: Int -> [a] -> [a]
 splice i xs = let (init, _:tail) = splitAt i xs
               in init ++ tail
+
+mapP :: (a -> IO b) -> [a] -> IO [b]
+mapP f xs = do
+  results <- mapM (const newEmptyMVar) xs
+  forM_ (zip xs results) $
+       \(x, resultVar) -> (do
+          result <- f x
+          putMVar resultVar (Right result)) `catch` ((putMVar resultVar) . Left)
+  forM results $
+       \resultVar ->
+           takeMVar resultVar >>= \result ->
+               case result of
+                 Left e -> throw (e :: SomeException)
+                 Right x -> return x

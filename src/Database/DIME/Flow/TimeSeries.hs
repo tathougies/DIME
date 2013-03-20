@@ -3,6 +3,7 @@ module Database.DIME.Flow.TimeSeries where
 
 import Control.Monad.Trans
 import Control.Monad
+import Control.Arrow ((&&&))
 
 import qualified Data.Map as M
 import qualified Data.Tree.DisjointIntervalTree as DIT
@@ -12,7 +13,8 @@ import qualified Data.Binary as Bin
 import qualified Data.Tuple as Tuple
 import Data.Text as T hiding (map, intercalate, all, head, foldl,
                               length, zip, splitAt, zipWith, concat,
-                              last, groupBy)
+                              last, groupBy, transpose, concatMap, group,
+                              scanl, tail)
 import Data.List
 import Data.String
 import Data.Int
@@ -20,6 +22,7 @@ import Data.Array
 import Data.IORef
 import Data.Function
 import Data.Tuple
+import Data.Maybe (fromJust)
 
 import qualified Database.DIME.Server.Peers as Peers
 import Database.DIME
@@ -28,7 +31,7 @@ import Database.DIME.Transport
 import Database.DIME.Server.State
 import Database.DIME.Flow.Types
 import Database.DIME.Memory.Block (ColumnType(..), ColumnValue)
-import Database.DIME.Memory.Operation
+import Database.DIME.Memory.Operation hiding (mapBlock)
 import Database.DIME.DataServer.Command hiding (BlockInfo)
 import Database.DIME.DataServer.Response
 
@@ -101,150 +104,131 @@ instance GData TimeSeries where
                             newTS <- addTS (asTimeSeries x) (asTimeSeries y)
                             returnPureGeneric newTS
 
-allocNewColumn :: GMachine ColumnID
-allocNewColumn = return (ColumnID 5)
+allocColumn :: GMachine ColumnID
+allocColumn = return (ColumnID 5)
 
 getResultTable :: GMachine TableID
 getResultTable = return (TableID 10)
 
+conformTimeSeriesRow :: Context IO -> [((RowID, RowID), BlockRowID)] -> TimeSeries -> IO TimeSeries
+conformTimeSeriesRow ctxt tsToBlockRowMappings ts
+    | tsToBlockRowMappings == (DIT.assocs $ tsRowMappings ts) = return ts
+    | otherwise = fail "Haven't yet implemented full row-level conformation"
+
+conformTimeSeriesBlocks :: Context IO -> [((BlockRowID, BlockRowID), BlockID)] -> TimeSeries -> IO TimeSeries
+conformTimeSeriesBlocks ctxt rowToIdMappings ts
+    | rowToIdMappings == (DIT.assocs $ tsBlockRanges ts) = return ts
+    | otherwise = fail "Haven't yet implemented full block-level conformation"
+
+mapBlock :: Context IO -> MapOperation -> [TimeSeries] -> BlockSpec -> IO (ColumnType, BlockInfo)
+mapBlock ctxt op timeSeriess resultBlock =
+  do
+    let BlockSpec _ _ blockId = resultBlock
+        blockInfos = map (fromJust . (M.lookup blockId) . tsBlocks) timeSeriess
+
+        -- get most popular peer
+        allPeers = concatMap (\(BlockInfo peers) -> peers) blockInfos
+        peerCounts = ((map (head &&& length)) . group . sort) allPeers
+        mostPopularPeer = fst $ maximumBy (compare `on` snd) peerCounts
+        PeerName mostPopularPeerTxt = mostPopularPeer
+
+        blockSpecs = map (\ts -> BlockSpec (tsTableId ts) (tsColumnId ts) blockId) timeSeriess
+
+    forM (zip timeSeriess blockInfos) $
+         \(timeSeries, BlockInfo peers) ->
+             when (not $ mostPopularPeer `elem` peers) $ do
+               let blockSpec = BlockSpec (tsTableId timeSeries) (tsColumnId timeSeries) blockId
+                   PeerName source = head peers
+               sendRequest ctxt (Connect mostPopularPeerTxt)
+                           (TransferBlock blockSpec blockSpec source) $
+                           \response ->
+                               case response of
+                                 Ok -> return ()
+                                 e -> fail $ "Inappropriate reply for block transfer: " ++ show e
+
+    sendRequest ctxt (Connect mostPopularPeerTxt)
+                (Map op blockSpecs resultBlock) $
+                \response ->
+                    case response of
+                      MapResponse resultType -> return (resultType, BlockInfo [mostPopularPeer])
+                      Fail e -> fail $ "Map failed: " ++ show e
+                      e -> fail $ "Inappropriate reply to map: " ++ show e
+
 mapTS :: MapOperation -> [TimeSeries] -> GMachine TimeSeries
-mapTS op timeSeriess = fail "not implemented"
--- do
---   timeSeriess <- liftIO $ alignTSs timeSeriess
---   let (masterTimeSeriesI, _) = minimumBy (compare `on` (M.size . tsBlocks . snd)) (zip [0..] timeSeriess) -- get timeseries with least number of blocks...
+mapTS op timeSeriess = do
+  timeSeriess <- alignTSs timeSeriess
+  let finalRowMappings = alignBlocks timeSeriess
+      tsToBlockRowMappings = tail $
+                             scanl (\((oldRowS, oldRowE), oldBlockS) (rowS, rowE) ->
+                                        let blockS = oldBlockS + (fromIntegral $ oldRowE - oldRowS)
+                                        in ((rowS, rowE), blockS))
+                             ((RowID 0, RowID 0), BlockRowID 0) finalRowMappings
 
---       timeSeries'' = splice masterTimeSeriesI timeSeriess -- remove the master time series from the list of time series to operate on
---       columnTypes = map tsDataType timeSeries''
+      finalLength = fromIntegral $ sum $ map (\((s, e), _) -> e - s) tsToBlockRowMappings
+      ((firstRowIndex, _), _) = head tsToBlockRowMappings
+      TOD startTimeS startTimePS = tsStartTime $ head timeSeriess
+      finalStartTime = TOD ((fromIntegral $ fromIntegral firstRowIndex * tsFrequency (head timeSeriess)) + startTimeS) startTimePS
 
---       alignment = alignBlocks timeSeriess
+  ctxt <- getZMQContext
 
---       tsKey ts = (tsTableId ts, tsColumnId ts)
---       timeSeriesMap = M.fromList $ zip (map tsKey timeSeriess) timeSeriess
+  timeSeriess <- liftIO $ mapP (conformTimeSeriesRow ctxt tsToBlockRowMappings) timeSeriess
 
---       lookupPeerName (BlockSpec tableId columnId blockId) =
---           let Just timeSeries = M.lookup (tableId, columnId) timeSeriesMap
---               Just (BlockInfo peers) = M.lookup blockId $ tsBlocks timeSeries
---               PeerName name = head peers
---           in name
+  -- At this point, the time series we have are in row-level alignment
+  -- this means that all blockrowids correspond, but the blocks may not correspond fully
 
---       transfer s bounds toBlockSpec fromBlockSpec fromPeer =
---           let transferCmd = TransferBlock toBlockSpec fromBlockSpec fromPeer
---           in sendOneRequest s transferCmd $
---              (\(response :: Response) ->
---                   when (isFailure response) $ fail ("Bad response from : " ++ show fromPeer ++ ": " ++ show response))
+  let masterBlockTemplate =
+          let masterBlockTemplateTS = minimumBy (compare `on` (DIT.size . tsBlockRanges)) timeSeriess
+          in DIT.assocs $ tsBlockRanges masterBlockTemplateTS
 
---   ctxt <- getZMQContext
+      blockIds = map snd masterBlockTemplate
 
---   -- Before we can make any requests, we need to know what blocks the result should go in, and also what intermediate blocks will have to be made
---   resultColumn <- allocNewColumn
---   resultTable <- getResultTable
---   let (resultBlocks, newBlocks) = splitAt (length alignment) $ map (\blockId -> BlockSpec resultTable resultColumn blockId) [BlockID 1..]
---       resultBlockIds = map (\(BlockSpec _ _ x) -> x) resultBlocks
+  timeSeriess <- liftIO $ mapP (conformTimeSeriesBlocks ctxt masterBlockTemplate) timeSeriess
 
---   newBlocksRef <- liftIO $ newIORef newBlocks
+  tableId <- getResultTable
+  columnId <- allocColumn
 
---   let groupedAlignments = groupBy ((==) `on` ((!! masterTimeSeriesI) . snd)) alignment
---       alignment' = map (\alignmentGroup -> let (bounds, blocks) = head alignmentGroup
---                                                masterBlock = blocks !! masterTimeSeriesI
---                                                alignmentGroup' = map (\(bounds, xs) -> (bounds, splice masterTimeSeriesI xs)) alignmentGroup
---                                            in (masterBlock, alignmentGroup')) groupedAlignments
+  -- At this point, the time series are in complete alignment, down to the blockid level
+  typesAndBlocks <- liftIO $ mapP ((mapBlock ctxt op timeSeriess) . (BlockSpec tableId columnId)) blockIds
 
---       newBlock = do
---         (blockId:newBlocks) <- liftIO $ readIORef newBlocksRef
---         writeIORef newBlocksRef newBlocks
---         return blockId
+  let (types, blockInfos) = unzip typesAndBlocks
+      blocks = zip blockIds blockInfos
+      typesCheck = all (== (head types)) types
+  when (not typesCheck) $ fail "time series map operation returned different types"
 
---   let justOneBlock alignment = let oneBlockEach = all (\(_, blocks) -> length blocks == 1) alignment
---                                    blocksMatch = let headBlock = head $ snd $ head alignment
---                                                  in all (\(_, blocks) -> head blocks == headBlock) alignment
---                                in oneBlockEach && blocksMatch
+  return TimeSeries {
+               tsTableName = fromString "",
+               tsColumnName = fromString "",
+               tsTableId = tableId,
+               tsColumnId = columnId,
+               tsDataType = head types,
+               tsLength = finalLength,
+               tsStartTime = finalStartTime,
+               tsFrequency = tsFrequency $ head timeSeriess,
+               tsBlocks = M.fromList blocks,
+               tsBlockRanges = DIT.fromList masterBlockTemplate,
+               tsRowMappings = DIT.fromList tsToBlockRowMappings
+             }
 
---       addBounds bounds = (fst $ head bounds, snd $ last bounds)
-
---   alignment'' <- liftIO $ forM alignment' $
---     (\(masterBlock, alignmentGroup) ->
---          case alignmentGroup of
---            _
---              | justOneBlock alignmentGroup -> return (masterBlock, [head $ snd $ head $ alignmentGroup], [(addBounds $ map fst alignmentGroup, [head $ snd $ head alignmentGroup])]) -- copying a single block...
---            (_, blocks):_ -> do -- more than one element
---              blockIds <- replicateM (length blocks) newBlock
---              return (masterBlock, blockIds, alignmentGroup))
-
---   -- copy all necessary blocks
---   forM_ alignment'' $
---     (\(masterBlockSpec, destBlocks, alignment) ->
---        liftIO $ safelyWithSocket ctxt Req (Connect $ lookupPeerName masterBlockSpec) $
---        (\s -> do
---          forM_ (zip columnTypes destBlocks) $
---            (\(columnType, destBlock) ->
---                 let minRow = fst $ fst $ head alignment
---                     maxRow = snd $ fst $ last alignment
---                     BlockSpec tblId _ _ = destBlock
---                 in when (tblId == resultTable) $
---                    sendOneRequest s (NewBlock destBlock minRow maxRow columnType) $
---                    (\(response :: Response) ->
---                         when (isFailure response) $ fail ("Bad repsonse: " ++ show response)))
---          forM_ alignment $
---            (\(bounds, blockSpecs) ->
---                 forM_ (zip destBlocks blockSpecs) $
---                   (\(destBlockSpec, blockSpec) ->
---                      let peerName = lookupPeerName blockSpec
---                      in when (destBlockSpec /= blockSpec) $ do
---                        transfer s bounds blockSpec destBlockSpec peerName))))
-
---   -- now issue map operations...
---   retTypes <- forM (zip resultBlocks alignment'') $
---     (\(resultBlock, (masterBlockSpec, destBlock, ((minRow, _),_):_)) ->
---          let (argsInit, argsTail) = splitAt masterTimeSeriesI destBlock
---              blockArgs = argsInit ++ [masterBlockSpec] ++ argsTail
---              mapCmd = Map op blockArgs resultBlock
---          in liftIO $ sendRequest ctxt (Connect $ lookupPeerName masterBlockSpec) mapCmd $
---                 (\(response :: Response) ->
---                      case response of
---                        MapResponse retType -> return retType
---                        Fail e -> fail $ "Map failed: " ++ show e
---                        InconsistentTypes -> fail $ "Map failed: mismatched types"
---                        BlockDoesNotExist -> fail $ "Internal map error: block does not exist on master"
---                        _ -> fail ("Bad response for map " ++ show mapCmd ++ ": " ++ show response)))
-
---   let typesCheck = all (== (head retTypes)) retTypes
---       blockMap = M.fromList $ zipWith (\(blockSpec, _) destBlockId -> (destBlockId, BlockInfo [PeerName $ lookupPeerName blockSpec])) alignment' resultBlockIds
---       -- alignment'' isn't used because we merge block bounds together
---       rowMappings = DIT.fromList $ concat $ zipWith (\(_, mappings) destBlockId -> map (\(bound, _) -> (bound, destBlockId)) mappings) alignment' resultBlockIds
---   unless typesCheck $ throwError "Map function returned different types"
-
---   return $ TimeSeries {
---                tsTableName = fromString "",
---                tsColumnName = fromString "",
---                tsTableId = resultTable,
---                tsColumnId = resultColumn,
---                tsDataType = head retTypes,
---                tsLength = tsLength $ head timeSeriess,
---                tsStartTime = tsStartTime $ head timeSeriess,
---                tsFrequency = tsFrequency $ head timeSeriess,
---                tsBlocks = blockMap,
---                tsRowMappings = rowMappings}
 
 addTS :: TimeSeries -> TimeSeries -> GMachine TimeSeries
 addTS x y = mapTS Sum [x, y]
 
-alignBlocks :: [TimeSeries] -> [((RowID, RowID), [BlockSpec])]
-alignBlocks = error "not implemented"-- alignBlocks'
-    -- where
-    --   alignBlocks' [] = []
-    --   alignBlocks' [x] = tsAssocs x
-    --   alignBlocks' [x,y] = mergeAlignmentResult $ calcBlockAlignments (tsAssocs x) (tsAssocs y)
-    --   alignBlocks' (x:y:timeSeriess) =
-    --       let assocss = map tsAssocs timeSeriess
-    --       in foldl (\x y -> mergeAlignmentResult $ calcBlockAlignments x y) (alignBlocks [x, y]) assocss
-    --   tsAssocs ts =
-    --     let basicAssocs = DIT.assocs $ tsRowMappings ts
-    --         tableId = tsTableId ts
-    --         columnId = tsColumnId ts
-    --         blockSpecAssocs = map (\(bounds, x) -> (bounds, BlockSpec tableId columnId x)) basicAssocs
-    --     in liftAssocs blockSpecAssocs
-    --   liftAssocs = map (\(bounds, a) -> (bounds, [a]))
-    --   mergeAlignmentResult = map (\(bounds, x, y) -> (bounds, x ++ y))
+alignBlocks :: [TimeSeries] -> [(RowID, RowID)]
+alignBlocks [] = []
+alignBlocks [x] = DIT.keys $ tsRowMappings x
+alignBlocks [x, y] =
+    let taggedExtents = calcBlockAlignments (DIT.assocs $ tsRowMappings x) (DIT.assocs $ tsRowMappings y)
+    in map (\(x, _, _) -> x) taggedExtents
+alignBlocks (x:y:timeSeriess) =
+    let tag = map (\x -> (x, ()))
+        untag = map (\(x, _, _) -> x)
+        startExtents = alignBlocks [x, y]
+        getRowMappings ts = tag $ DIT.keys $ tsRowMappings ts
+    in foldl (\x y -> untag $
+                      calcBlockAlignments
+                        (tag x)
+                        (getRowMappings y))
+       startExtents timeSeriess
 
 forceTimeSeries :: TimeSeries -> GMachine ()
 forceTimeSeries ts = do
@@ -292,10 +276,10 @@ readTimeSeries ts = do
 
   return timedData'
 
-alignTSs :: [TimeSeries] -> IO [TimeSeries]
+alignTSs :: [TimeSeries] -> GMachine [TimeSeries]
 alignTSs (x:xs)
     | all ((withinBounds (tsFrequency x) (tsStartTime x)) . tsStartTime) xs && all ((== (tsFrequency x)) . tsFrequency) xs = return $ x:xs
-    | otherwise = error "Alignment not yet implemented..."
+    | otherwise = fail "Alignment not yet implemented..."
  where
    withinBounds frequency time1 time2 = (time1 `absDiffClockTimesInSeconds` time2) < (fromIntegral frequency)
 
@@ -307,20 +291,6 @@ alignTSs (x:xs)
            in if psecsDiff < 0 then (fromIntegral $ secs - 1) + (fromIntegral (-psecsDiff) :: Double) / 1000000000000.0
               else (fromIntegral $ secs) + (fromIntegral psecsDiff :: Double) / 1000000000000.0
        else absDiffClockTimesInSeconds t2 t1
-
-    -- mapTS :: MapOperation -> [TimeSeries] -> IO TimeSeries
-    -- mapTS op tss = do
-    --   when (tsNotAligned tss) $ fail "Cannot map unaligned time series"
-    --   tss' <- mapM forceTS tss -- Make sure we have the full version of each timeseries
-    --   let tssBlocks = map (\ts -> map (tsTableId ts, tsColumnId ts,) $ tsBlocks ts) tss'
-    --       tssBlocks' = L.transpose tssBlocks -- Now we have a list of lists. Each element is a list of corresponding blocks in each time series
-    --   tssBlocks'' <- mapM migrateBlocks tssBlocks' -- Migrate blocks so that all blocks for each submap are on the same server
-
-    --   -- Allocate a new table ID from the main server
-    --   tableId <- allocTableId
-
-    --   tssBlocks''' <- mapM (issueMap tableId (ColumnID 0) op) tssBlocks''
-    --   return $ mkAbsTimeSeries tableId (ColumnID 0) (tsAlignment $ head tss) tssBlocks''' -- TODO get the DIT down as well!
 
     -- -- | returns a pair, (ts1', ts2'), containing copies of t1 and t2, aligned with one another
     -- align :: TimeSeries -> TimeSeries -> DIME (TimeSeries, TimeSeries)
