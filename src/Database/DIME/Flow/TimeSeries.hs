@@ -14,7 +14,7 @@ import qualified Data.Tuple as Tuple
 import Data.Text as T hiding (map, intercalate, all, head, foldl,
                               length, zip, splitAt, zipWith, concat,
                               last, groupBy, transpose, concatMap, group,
-                              scanl, tail)
+                              scanl, tail, init, tails)
 import Data.List
 import Data.String
 import Data.Int
@@ -31,7 +31,9 @@ import Database.DIME.Transport
 import Database.DIME.Server.State
 import Database.DIME.Flow.Types
 import Database.DIME.Memory.Block (ColumnType(..), ColumnValue)
-import Database.DIME.Memory.Operation hiding (mapBlock)
+import Database.DIME.Memory.Operation
+import Database.DIME.Memory.Operation.Mappable as OM hiding (mapBlock)
+import Database.DIME.Memory.Operation.Collapsible as OC hiding (collapseBlock)
 import Database.DIME.DataServer.Command hiding (BlockInfo)
 import Database.DIME.DataServer.Response
 
@@ -209,9 +211,76 @@ mapTS op timeSeriess = do
                tsRowMappings = DIT.fromList tsToBlockRowMappings
              }
 
+collapseTS :: CollapseOperation -> Int -> TimeSeries -> GMachine TimeSeries
+collapseTS collapseOp collapseLength ts = do
+  resultTableId <- getResultTable
+  resultColumnId <- allocColumn
+  let finalLength = (fromIntegral $ tsLength ts) - collapseLength + 1
+      blockss = init $ tails (DIT.assocs $ tsBlockRanges ts)
+
+      getNValues :: Context IO -> Int -> [((BlockRowID, BlockRowID), BlockID)] -> [ColumnValue] -> IO [ColumnValue]
+      getNValues _ 0 _ a = return a
+      getNValues _ _ [] a = return a
+      getNValues ctxt n (((s, e), blockId):blocksLeft) a = do
+          let valuesToTake = min (fromIntegral $ e - s) n
+              rangeToTake = (s, s + fromIntegral valuesToTake)
+              Just (BlockInfo peers) = M.lookup blockId (tsBlocks ts)
+              PeerName peerName = head peers
+          values <-
+              sendRequest ctxt (Connect peerName)
+                (FetchRows (tsTableId ts) [rangeToTake] [tsColumnId ts]) $
+                \response -> case response of
+                               FetchRowsResponse [values] -> return values
+                               e -> fail $ "Bad response for FetchRows: " ++ show e
+          if valuesToTake < n
+             then getNValues ctxt (n - valuesToTake) blocksLeft (a ++ values)
+             else return $ a ++ values
+
+      collapseBlock :: Context IO -> [((BlockRowID, BlockRowID), BlockID)] -> IO (BlockID, BlockInfo)
+      collapseBlock ctxt (blockToCollapse:remainingBlocks) =
+          do
+            putStrLn $ "Collapsing block " ++ show blockToCollapse
+            suffixValues <- getNValues ctxt collapseLength remainingBlocks []
+            putStrLn $ "Got values " ++ show suffixValues
+            let (_, blockId) = blockToCollapse
+                collapseCmd = Collapse {
+                                collapseOperation = collapseOp,
+                                collapseBlockSpec = BlockSpec (tsTableId ts) (tsColumnId ts) blockId,
+                                collapseResultBlock = BlockSpec resultTableId resultColumnId blockId,
+                                collapseBlockSuffix = suffixValues,
+                                collapseLength = collapseLength}
+
+                Just (BlockInfo peers) = M.lookup blockId $ tsBlocks ts
+                PeerName peerName = head peers
+            putStrLn $ "Collapse cmd " ++ show collapseCmd
+            sendRequest ctxt (Connect peerName) collapseCmd $
+                 \response ->
+                     case response of
+                       Ok -> return (blockId, BlockInfo [PeerName peerName])
+                       InconsistentTypes -> fail "Inconsistent types for collapse"
+                       e -> fail $ "Bad response for collapse: " ++ show e
+
+  ctxt <- getZMQContext
+  blockInfos <- liftIO $ mapP (collapseBlock ctxt) blockss
+  liftIO $ putStrLn "Done with block infos..."
+  return TimeSeries {
+               tsTableName = fromString "",
+               tsColumnName = fromString "",
+               tsTableId = resultTableId,
+               tsColumnId = resultColumnId,
+               tsDataType = tsDataType ts,
+               tsLength = fromIntegral finalLength,
+               tsStartTime = tsStartTime ts,
+               tsFrequency = tsFrequency ts,
+               tsBlocks = M.fromList blockInfos,
+
+               -- TODO: THESE DITs are INCORRECT... the last few indices must be removed
+               tsBlockRanges = tsBlockRanges ts,
+               tsRowMappings = tsRowMappings ts}
+
 
 addTS :: TimeSeries -> TimeSeries -> GMachine TimeSeries
-addTS x y = mapTS Sum [x, y]
+addTS x y = mapTS OM.Sum [x, y]
 
 alignBlocks :: [TimeSeries] -> [(RowID, RowID)]
 alignBlocks [] = []

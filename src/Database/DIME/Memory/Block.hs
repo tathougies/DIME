@@ -5,10 +5,14 @@ module Database.DIME.Memory.Block
      ColumnType(..),
      BlockStorable(..),
      Block (..),
+     fromList, fromListUnboxed,
      typeRepToColumnType,
-     withColumnValue
+     withColumnValue,
+     getColumnValues,
+     putColumnValues
     ) where
 
+import qualified Prelude as Prelude
 import Prelude hiding (length)
 
 import Data.List hiding (length)
@@ -29,6 +33,8 @@ import Control.DeepSeq
 import Test.QuickCheck.All
 
 import Text.JSON
+
+import Unsafe.Coerce
 
 blockLength = 65536 -- blocks store 65k entries
 
@@ -58,7 +64,11 @@ class (Show s, Read s, Binary s, Typeable s, JSON s, NFData (Block s)) => BlockS
     slice :: Int -> Int -> Block s -> Block s
 
     -- | Add an element to the end of a block
-    append :: s -> Block s -> Block s
+    snoc :: s -> Block s -> Block s
+
+    -- | Append two blocks together
+    append :: Block s -> Block s -> Block s
+    append prefix suffix = foldr snoc prefix (toList suffix)
 
     -- | default value
     defaultBlockElement :: s
@@ -67,10 +77,10 @@ class (Show s, Read s, Binary s, Typeable s, JSON s, NFData (Block s)) => BlockS
     toList :: Block s -> [s]
     toList blk = map (blk #!) [0..length blk - 1]
 
-    -- | resize block. Default implementation uses slice, append, and defaultBlockElement
+    -- | resize block. Default implementation uses slice, snoc, and defaultBlockElement
     resize :: Int -> Block s -> Block s
     resize newSize block
-        | (Database.DIME.Memory.Block.length block) < newSize = let ret = foldr append block $ replicate (newSize - (Database.DIME.Memory.Block.length block)) defaultBlockElement
+        | (Database.DIME.Memory.Block.length block) < newSize = let ret = foldr snoc block $ replicate (newSize - (Database.DIME.Memory.Block.length block)) defaultBlockElement
                                                                 in
                                                                   ret `seq` ret
         | (Database.DIME.Memory.Block.length block) > newSize = slice 0 newSize block -- Slice
@@ -93,7 +103,9 @@ instance BlockStorable [Char] where
     length (StringStorage storage) = let (upper, lower) = A.bounds storage
                                      in lower - upper + 1
 
-    append e s@(StringStorage v) = StringStorage $ A.listArray (0, Database.DIME.Memory.Block.length s) $ (A.elems v) ++ [e]
+    snoc e s@(StringStorage v) = StringStorage $ A.listArray (0, Database.DIME.Memory.Block.length s) $ (A.elems v) ++ [e]
+    append p@(StringStorage prefix) s@(StringStorage suffix) =
+        StringStorage $ A.listArray (0, Database.DIME.Memory.Block.length s + Database.DIME.Memory.Block.length p) $ (A.elems prefix) ++ (A.elems suffix)
     slice b e (StringStorage v) = StringStorage $ A.listArray (0, e - b - 1) $ map (v A.!) [b..e-1]
     defaultBlockElement = ""
 
@@ -117,8 +129,9 @@ instance BlockStorable Int where
     empty = IntStorage $ V.empty
     length (IntStorage storage) = V.length storage
 
-    append e (IntStorage v) = IntStorage $ V.snoc v e
-    slice b e (IntStorage v) = IntStorage $ V.slice b e v
+    snoc e (IntStorage v) = IntStorage $ V.snoc v e
+    append (IntStorage prefix) (IntStorage suffix) = IntStorage $ prefix V.++ suffix
+    slice b e (IntStorage v) = IntStorage $ V.slice b (e - b + 1) v
     defaultBlockElement = 0
 
     toList (IntStorage v) = V.toList v
@@ -128,6 +141,23 @@ instance BlockStorable Int where
                                                                   IntStorage v -> IntStorage $ V.fromList $ (V.toList v) ++ replicate (newSize - V.length v) defaultBlockElement
         | (Database.DIME.Memory.Block.length block) > newSize = slice 0 newSize block -- Slice
         | otherwise = block
+
+fromListUnboxed :: BlockStorable a => [a] -> Block a
+fromListUnboxed l =
+    let blockBase = resize (Prelude.length l) empty
+    in blockBase `update` (zip [0..] l)
+
+fromList :: BlockStorable a => [ColumnValue] -> Block a
+fromList values =
+    let defaultResultElement =
+            let constraint :: BlockStorable a => Block a -> a -- type system trickery
+                constraint _ = defaultBlockElement
+            in constraint resultBlock
+
+        blockType = typeOf defaultResultElement
+        typesCheck = all ((== blockType) . (withColumnValue typeOf)) values
+        resultBlock = fromListUnboxed $ map (withColumnValue unsafeCoerce) values
+    in if typesCheck then resultBlock else error "types don't check in fromList"
 
 instance NFData (Block Int) where
     rnf (IntStorage a) = rnf a
@@ -141,8 +171,9 @@ instance BlockStorable Double where
     empty = DoubleStorage $ V.empty
     length (DoubleStorage storage) = V.length storage
 
-    append e (DoubleStorage v) = DoubleStorage $ V.snoc v e
-    slice b e (DoubleStorage v) = DoubleStorage $ V.slice b e v
+    snoc e (DoubleStorage v) = DoubleStorage $ V.snoc v e
+    append (DoubleStorage prefix) (DoubleStorage suffix) = DoubleStorage $ prefix V.++ suffix
+    slice b e (DoubleStorage v) = DoubleStorage $ V.slice b (e - b + 1) v
     defaultBlockElement = 0.0
 
     toList (DoubleStorage v) = V.toList v
@@ -203,6 +234,25 @@ instance JSON ColumnValue where
             Ok $ ColumnValue (fromRational d :: Double)
     readJSON (JSString s) = Ok $ ColumnValue (fromJSString s)
     readJSON _ = Error "Bad type for ColumnValue"
+
+getColumnValues :: Get [ColumnValue]
+getColumnValues = do
+  length <- (get :: Get Int)
+  if length /= 0
+     then do
+       typeName <- (get :: Get String)
+       case typeName of
+         "Int" -> replicateM length (liftM ColumnValue (get :: Get Int))
+         "Double" -> replicateM length (liftM ColumnValue (get :: Get Double))
+         "[Char]" -> replicateM length (liftM ColumnValue (get :: Get String))
+     else return []
+
+putColumnValues :: [ColumnValue] -> Put
+putColumnValues [] = put (0 :: Int)
+putColumnValues xs = do
+  put (Prelude.length xs :: Int)
+  put (withColumnValue (show . typeOf) (head xs))
+  forM_ xs $ withColumnValue put
 
 -- | Data class for column types
 data ColumnType = IntColumn | StringColumn | DoubleColumn

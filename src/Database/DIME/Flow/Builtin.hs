@@ -20,8 +20,9 @@ module Database.DIME.Flow.Builtin where
     import Database.DIME.Server.State
     import Database.DIME.Flow.Types
     import Database.DIME.Flow.TimeSeries
-    import Database.DIME.Memory.Block (ColumnType(..))
+    import Database.DIME.Memory.Block (ColumnType(..), Block, fromListUnboxed)
     import Database.DIME.Memory.Operation.Mappable
+    import Database.DIME.Memory.Operation.Collapsible
 
     import Language.Flow.Module
     import Language.Flow.Execution.Types
@@ -34,7 +35,13 @@ module Database.DIME.Flow.Builtin where
     dimeBuiltin = mkModule "DIME"
                   [("timeSeries", mkBuiltin "timeSeries" 1 builtinTimeSeries),
                    ("mkTSAccessor", mkBuiltin' "mkTSAccessor" 2 builtinMkTSAccessor),
-                   ("mapTS", mkBuiltin' "mapTS" 3 builtinMapTS)]
+
+                   -- Map operation
+                   ("mapTS", mkBuiltin' "mapTS" 3 builtinMapTS),
+
+                   -- Collapse operation
+                   ("differentiate", mkBuiltin "differentiate" 1 builtinDifferentiate)
+                  ]
         where
           builtinTimeSeries [x] = do
             if isString x then do
@@ -95,7 +102,20 @@ module Database.DIME.Flow.Builtin where
                   mapOp = GMachineMap staticState'' op
 
               newTS <- mapTS mapOp [ts1TS, ts2TS]
-              returnPureGeneric $ newTS
+              returnPureGeneric newTS
+
+          builtinDifferentiate [ts1] = do
+              when (not $ isTimeSeries ts1) $
+                   throwError $ "Argument to differentiate must be a time series"
+              let ts1TS = asTimeSeries ts1
+                  collapseOp = case tsDataType ts1TS of
+                                 IntColumn -> Convolve (fromListUnboxed [1, -1] :: Block Int)
+                                 DoubleColumn -> Convolve (fromListUnboxed [1, -1] :: Block Double)
+              case tsDataType ts1TS of
+                StringColumn -> throwError "Cannot differentiate time series of type string"
+                _ -> return ()
+              newTS <- collapseTS collapseOp 2 ts1TS
+              returnPureGeneric newTS
 
     fetchTimeSeriesCollection :: TimeSeriesName -> GMachine TimeSeriesCollection
     fetchTimeSeriesCollection tsName = do

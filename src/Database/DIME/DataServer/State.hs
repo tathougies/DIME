@@ -1,9 +1,9 @@
-{-# LANGUAGE ExistentialQuantification, RankNTypes, BangPatterns #-}
+{-# LANGUAGE ExistentialQuantification, RankNTypes, BangPatterns, RecordWildCards #-}
 module Database.DIME.DataServer.State
     ( DataServerState(..), GenericBlock(..),
       mkEmptyServerState,
       emptyBlockFromType, insertBlock, hasBlock,
-      mapServerBlock, forceCompute,
+      mapServerBlock, collapseServerBlock, forceCompute,
       hasTable, hasColumn, hasRow,
       deleteBlock, getBlockInfo, withGenericBlock,
       modifyGenericBlock,
@@ -26,9 +26,11 @@ import qualified Database.DIME.Memory.Block as B
 import Database.DIME.Memory.Block ((#!))
 import Database.DIME.Memory.BlockInfo as BI
 import Database.DIME.Memory.Operation.Mappable as BM
+import Database.DIME.Memory.Operation.Collapsible as BC
 import Database.DIME.Memory.Operation.Int ()
 import Database.DIME.Memory.Operation.Double ()
 import Database.DIME.Memory.Operation.String ()
+import Database.DIME.DataServer.Command
 import Database.DIME
 
 import qualified Data.Map as M
@@ -54,7 +56,7 @@ import Text.JSON as JSON
 import Unsafe.Coerce
 
 -- | data type to hold any generic block. There are convenience methods to cast (safely) to specific block types
-data GenericBlock = forall a. BM.BlockMappable a => GenericBlock !BlockRowID !(B.Block a)
+data GenericBlock = forall a. (BM.BlockMappable a, BC.BlockCollapsible a) => GenericBlock !BlockRowID !(B.Block a)
 
 instance Show GenericBlock where
     show (GenericBlock r b) = "GenericBlock " ++ (show r) ++ " " ++ (show b)
@@ -352,6 +354,24 @@ mapServerBlock op inputs output@(BlockSpec tableId columnId blockId) state =
                      in Just state''
        else Nothing
 
+collapseServerBlock :: Command -> DataServerState -> Maybe DataServerState
+collapseServerBlock Collapse {..} state =
+    let Just genericInputBlock = M.lookup collapseBlockSpec $ getBlocks state
+    in usingGenericBlock genericInputBlock $
+       \inputBlock ->
+         let finalInputBlock = inputBlock `B.append` (B.fromList collapseBlockSuffix)
+
+             blockType = genericTypeOf genericInputBlock
+             firstRow = genericFirstRow genericInputBlock
+         in case collapseBlock collapseOperation collapseLength finalInputBlock of
+           Nothing -> Nothing
+           Just x ->
+             let resultBlock = GenericBlock firstRow x
+                 state' = insertBlock collapseResultBlock resultBlock state
+                 BlockSpec resultTableId resultColumnId resultBlockId = collapseResultBlock
+                 state'' = establishRowMapping (resultTableId, resultColumnId) (firstRow, firstRow + BlockRowID(fromIntegral $ genericLength resultBlock)) resultBlockId state'
+             in Just state''
+
 establishRowMapping :: (TableID, ColumnID) -> (BlockRowID, BlockRowID) -> BlockID -> DataServerState -> DataServerState
 establishRowMapping blockKey bounds blockId st@(DataServerState {getRowMappings = rowMappings}) =
     let updateRowMapping :: Maybe (DIT.DisjointIntervalTree BlockRowID BlockID) -> Maybe (DIT.DisjointIntervalTree BlockRowID BlockID)
@@ -369,8 +389,10 @@ genericTypeOf = withGenericBlock (\x -> typeOf $ x #! 0)
 genericFirstRow :: GenericBlock -> BlockRowID
 genericFirstRow (GenericBlock r _) = r
 
-withGenericBlock :: (forall a. BM.BlockMappable a => B.Block a -> b) ->  GenericBlock -> b
+withGenericBlock :: (forall a. (BM.BlockMappable a, BC.BlockCollapsible a) => B.Block a -> b) ->  GenericBlock -> b
 withGenericBlock f (GenericBlock _ b) = f b
+
+usingGenericBlock = flip withGenericBlock
 
 genericCoerceInt :: GenericBlock -> Maybe (B.Block Int)
 genericCoerceInt block
@@ -389,7 +411,7 @@ genericCoerceString block
 
 -- | Apply transformation functions on the fields of a generic block
 --   Captures type variables, so it makes the type system happy
-modifyGenericBlock :: (BlockRowID -> BlockRowID) -> (forall a. BM.BlockMappable a => B.Block a -> B.Block a) -> GenericBlock -> GenericBlock
+modifyGenericBlock :: (BlockRowID -> BlockRowID) -> (forall a. (BM.BlockMappable a, BC.BlockCollapsible a) => B.Block a -> B.Block a) -> GenericBlock -> GenericBlock
 modifyGenericBlock rowIndexF dataF (GenericBlock r b) = GenericBlock (rowIndexF r) (dataF b)
 
 dumpState :: TVar DataServerState -> IO ()

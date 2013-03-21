@@ -6,8 +6,11 @@ module Database.DIME.Memory.Operation.Double () where
     import qualified Data.Vector.Unboxed as V
     import Data.Typeable
 
+    import qualified Database.DIME.Memory.Operation.Mappable as MapOp
+    import qualified Database.DIME.Memory.Operation.Collapsible as CollapseOp
+    import Database.DIME.Memory.Operation.Mappable hiding (Sum, Product, AddConstant, Scale)
+    import Database.DIME.Memory.Operation.Collapsible hiding (Sum, Product, Convolve)
     import Database.DIME.Memory.Block
-    import Database.DIME.Memory.Operation.Mappable
 
     import Language.Flow.Execution.Types
     import Language.Flow.Execution.GMachine
@@ -25,12 +28,12 @@ module Database.DIME.Memory.Operation.Double () where
         | otherwise = error $ "Can't coerce " ++ show v ++ " as Double"
 
     haskellOp :: MapOperation -> Double -> Double
-    haskellOp (AddConstant v) = (+ (cvAsDouble v))
-    haskellOp (Scale v) = (+ (cvAsDouble v))
+    haskellOp (MapOp.AddConstant v) = (+ (cvAsDouble v))
+    haskellOp (MapOp.Scale v) = (+ (cvAsDouble v))
 
     haskellOp2 :: MapOperation -> Double -> Double -> Double
-    haskellOp2 Sum = (+)
-    haskellOp2 Product = (*)
+    haskellOp2 MapOp.Sum = (+)
+    haskellOp2 MapOp.Product = (*)
 
     instance BlockMappable Double where
         -- Note that both of these return lazy streams. Eventually, the computation will be forced
@@ -65,3 +68,10 @@ module Database.DIME.Memory.Operation.Double () where
         mapBlock _ _ = Nothing
 
         isMappable _ = True
+
+    instance BlockCollapsible Double where
+        collapseOp2Func CollapseOp.Sum (DoubleStorage v) = V.sum v
+        collapseOp2Func CollapseOp.Product (DoubleStorage v) = V.product v
+        collapseOp2Func (CollapseOp.Convolve storage) (DoubleStorage v) =
+            case unsafeCoerce storage of
+              DoubleStorage values -> V.sum $ V.zipWith (*) values v

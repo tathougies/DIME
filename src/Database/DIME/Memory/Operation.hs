@@ -1,11 +1,10 @@
 module Database.DIME.Memory.Operation
-    (module Database.DIME.Memory.Operation.Mappable,
-
-     calcBlockAlignments) where
+    (calcBlockAlignments) where
 
 import Database.DIME
 
 import Database.DIME.Memory.Operation.Mappable
+import Database.DIME.Memory.Operation.Collapsible
 
 import Database.DIME.Memory.Operation.Double
 import Database.DIME.Memory.Operation.Int

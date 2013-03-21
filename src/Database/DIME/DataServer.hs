@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables, BangPatterns, ViewPatterns #-}
+{-# LANGUAGE ScopedTypeVariables, BangPatterns, ViewPatterns, RecordWildCards, NamedFieldPuns #-}
 module Database.DIME.DataServer
     (
      dataServerMain, dataServerSimpleClient
@@ -186,6 +186,7 @@ dataServerMain coordinatorName localAddress = do
       serveRequest s (return ()) $
          \(cmd :: Command) -> do
             launchMainLoop c stateVar coordinatorName
+            infoM moduleName $ "Got command: " ++ show cmd
             case cmd of
               RunQuery key txt -> doRunQuery c coordinatorName key txt -- this runs in the IO monad, non-atomically
               _ -> do
@@ -205,6 +206,8 @@ dataServerMain coordinatorName localAddress = do
                                     doBlockInfo blockSpec state
                                 Map op inputs output ->
                                     doMap op inputs output state
+                                collapseOp@Collapse {} ->
+                                    doCollapse collapseOp state
                                 ForceComputation blockSpec ->
                                     doForceComputation blockSpec state
                     case newState of
@@ -317,6 +320,13 @@ dataServerMain coordinatorName localAddress = do
                  Just state' ->
                      let blockInfo = ServerState.getBlockInfo output state'
                      in return (MapResponse (BI.blockType blockInfo), Just state')
+           else return (BlockDoesNotExist, Nothing)
+
+    doCollapse collapseOp@Collapse {collapseBlockSpec} state =
+        if ServerState.hasBlock collapseBlockSpec state
+           then case ServerState.collapseServerBlock collapseOp state of
+                  Nothing -> return (InconsistentTypes, Nothing)
+                  Just state' -> return (Ok, Just state')
            else return (BlockDoesNotExist, Nothing)
 
     doForceComputation blockSpec state =
