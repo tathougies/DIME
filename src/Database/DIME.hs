@@ -29,22 +29,6 @@ newtype BlockRowID = BlockRowID Int64
 data BlockSpec = BlockSpec TableID ColumnID BlockID
     deriving (Ord, Eq, Show, Read)
 
--- instance Binary BlockID where
---     put (BlockID blockId) = put blockId
---     get = liftM BlockID get
-
--- instance Binary TableID where
---     put (TableID tableId) = put tableId
---     get = liftM TableID get
-
--- instance Binary ColumnID where
---     put (ColumnID columnId) = put columnId
---     get = liftM ColumnID get
-
--- instance Binary RowID where
---     put (RowID rowId) = put rowId
---     get = liftM RowID get
-
 instance Binary BlockSpec where
     put (BlockSpec tId cId bId) = do
       put tId

@@ -37,12 +37,65 @@ newtype QueryKey = QueryKey Int64
 
 -- | Represents a data node command
 data Command = UpdateRows TableID [BlockRowID] [ColumnID] [[ColumnValue]] |
+               -- ^ Updates the columns given in block-level rows specified with the given
+               -- values. The values array is in row major format; that is, each element of the
+               -- ColumnValues array represents a row of values.
+               --
+               -- Possible responses:
+               --
+               --    [`Ok'] The command succeeded and the rows are now updated
+               --
+               --    [`InconsistentTypes'] The command failed because the types of the ColumnValues
+               --    did not match the types of the columns given.
+
                FetchRows TableID [(BlockRowID,  BlockRowID)] [ColumnID] |
+               -- ^ Get rows from a block. The TableID gives the id of the table, the ColumnIDs are
+               -- the columns from which to fetch and the BlockRowID list gives the list of block
+               -- ranges to fetch. The returned rows correspond to the BlockRowIDs in the
+               -- concatenation of all the ranges.
+               --
+               -- Possible responses:
+               --
+               --     [`FetchRowsResponse' @values@] @values@ is a list of lists. The inner most
+               --     lists contain entries corresponding to each column's values in the row. In the
+               --     outer list, the values are returned in the order specified by the the
+               --     BlockRowID list.
+               --
+               --     [`InconsistentArguments'] The table given does not exist, the columns
+               --     supplied do not exist, or the ranges specified do not exist.
 
                -- Block commands
                NewBlock BlockSpec BlockRowID BlockRowID ColumnType |
+               -- ^ @NewBlock spec start end blockType@ Creates a new block with the given
+               -- identifier @spec@, whose values range from @start@ to @end@ and who are of type
+               -- @blockType@
+               --
+               -- Possible responses:
+               --
+               --     [`Ok'] The block was created with the given specifications and now exists.
+               --
+               --     [`BlockAlreadyExists'] The block already exists. Nothing was changed on the server.
+
                DeleteBlock BlockSpec |
+               -- ^ Delete the block specified. The command does not fail in the sense that, after
+               -- the command is run, the block specified in the command will not exist (either
+               -- because it never existed or because it was removed)
+               --
+               -- Possible responses:
+               --
+               --    [`Ok'] The block specified was deleted.
+               --
+               --    [`BlockAreadyExists'] The block specified did not exist.
+
                BlockInfo BlockSpec |
+               -- ^ Fetch meta-data about the specified block.
+               --
+               -- Possible responses:
+               --
+               --    [`BlockInfoResponse' @blockInfo@] The requested info. The @blockInfo@ returned
+               --    has type `BlockInfo'.
+               --
+               --    [`BlockDoesNotExist'] The block requested does not exist.
 
                TransferBlock BlockSpec BlockSpec String |
 
