@@ -8,41 +8,41 @@ synopsis: Dime: A Distributed In-memory environment
 description:
 data-dir: ""
 
-executable dime-data-client
-    build-depends: QuickCheck -any, base -any, vector -any, data-default -any,
-                   zeromq3-haskell -any, haskeline -any, binary -any, bytestring -any,
-                   hslogger -any, array -any, split -any, containers -any, json -any,
-                   network -any, parallel -any, deepseq -any, mtl -any, unix -any,
-                   filepath -any, base64-bytestring -any, zlib -any, ConfigFile -any,
-                   MissingH -any
-    main-is: SimpleDataClient.hs
-    buildable: True
-    hs-source-dirs: src
-    ghc-options: -fglasgow-exts -O2
+-- executable dime-data-client
+--     build-depends: QuickCheck -any, base -any, vector -any, data-default -any,
+--                    zeromq3-haskell -any, haskeline -any, binary -any, bytestring -any,
+--                    hslogger -any, array -any, split -any, containers -any, json -any,
+--                    network -any, parallel -any, deepseq -any, mtl -any, unix -any,
+--                    filepath -any, base64-bytestring -any, zlib -any, ConfigFile -any,
+--                    MissingH -any, semigroups -any
+--     main-is: SimpleDataClient.hs
+--     buildable: True
+--     hs-source-dirs: src
+--     ghc-options: -fglasgow-exts -O2
 
-executable dime-data-server
-    build-depends: QuickCheck -any, base -any, vector -any, data-default -any,
-                   zeromq3-haskell -any, haskeline -any, binary -any, bytestring -any,
-                   hslogger -any, array -any, split -any, containers -any, json -any,
-                   network -any, parallel -any, deepseq -any, mtl -any, unix -any,
-                   filepath -any, base64-bytestring -any, zlib -any, ConfigFile -any,
-                   MissingH -any
-    main-is: DataServer.hs
-    buildable: True
-    hs-source-dirs: src
-    ghc-options: -fglasgow-exts -O2
+-- executable dime-data-server
+--     build-depends: QuickCheck -any, base -any, vector -any, data-default -any,
+--                    zeromq3-haskell -any, haskeline -any, binary -any, bytestring -any,
+--                    hslogger -any, array -any, split -any, containers -any, json -any,
+--                    network -any, parallel -any, deepseq -any, mtl -any, unix -any,
+--                    filepath -any, base64-bytestring -any, zlib -any, ConfigFile -any,
+--                    MissingH -any, semigroups -any
+--     main-is: DataServer.hs
+--     buildable: True
+--     hs-source-dirs: src
+--     ghc-options: -fglasgow-exts -O2
 
-
-executable dime-web-server
+executable dime-server
     build-depends: QuickCheck -any, base -any, vector -any, data-default -any,
                    zeromq3-haskell -any, haskeline -any, binary -any, bytestring -any,
                    hslogger -any, array -any, split -any, containers -any, json -any,
                    text -any, http-types ==0.7.3.0.1, wai -any, stm -any, warp -any,
                    transformers -any, directory -any, conduit -any, wai-extra -any,
                    old-locale -any, PSQueue -any, resourcet -any, network -any, old-time -any,
-                   mtl -any, parsec -any, pretty -any, ConfigFile -any,
-                   MissingH -any
-    main-is: WebServer.hs
+                   mtl -any, parsec -any, pretty -any, ConfigFile -any, deepseq -any, unix -any,
+                   MissingH -any, semigroups -any, filepath -any, base64-bytestring -any,
+                   ConfigFile -any, zlib -any, parallel -any
+    main-is: Server.hs
     buildable: True
     hs-source-dirs: src
     ghc-options: -fglasgow-exts -O2

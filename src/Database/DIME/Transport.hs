@@ -24,6 +24,7 @@ import Control.Monad (forever)
 import Control.Monad.Trans
 
 import qualified Data.ByteString as Strict
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.ByteString.Lazy
 import Data.Binary
 
@@ -175,4 +176,4 @@ proxy from to = do
 tunnel :: (ZMQ.Receiver a, ZMQ.Sender b) => Socket IO a -> Socket IO b -> IO ()
 tunnel (ZMQSocket from) (ZMQSocket to) = do
   parts <- ZMQ.receiveMulti from
-  ZMQ.sendMulti to parts
+  ZMQ.sendMulti to (NonEmpty.fromList parts)

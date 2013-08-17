@@ -15,6 +15,8 @@ module Database.DIME.Memory.Block
 import qualified Prelude as Prelude
 import Prelude hiding (length)
 
+import Control.Applicative hiding (empty)
+
 import Data.List hiding (length)
 import Data.List.Split
 import Data.Default
@@ -25,7 +27,9 @@ import Data.Ratio
 import Data.Array.IArray ( (!), (//) )
 
 import qualified Data.Vector.Unboxed as V
+import qualified Data.Vector.Unboxed.Mutable as MV
 import qualified Data.Array.IArray as A
+import qualified Data.Array.IO as AIO
 
 import Control.Monad
 import Control.DeepSeq
@@ -46,6 +50,16 @@ blockLength = 65536 -- blocks store 65k entries
 -}
 class (Show s, Read s, Binary s, Typeable s, JSON s, NFData (Block s)) => BlockStorable s where
     data Block s
+    data BlockIO s
+
+    -- | Monadic indexing
+    newM    :: Int -> IO (BlockIO s)
+    indexM  :: BlockIO s -> Int -> IO s
+    updateM :: BlockIO s -> Int -> s -> IO ()
+    lengthM :: BlockIO s -> IO Int
+    forceComputeM :: BlockIO s -> IO ()
+    freeze :: BlockIO s -> IO (Block s)
+    thaw :: Block s -> IO (BlockIO s)
 
     -- | Get data at an index
     infixl 8 #!
@@ -91,6 +105,13 @@ class (Show s, Read s, Binary s, Typeable s, JSON s, NFData (Block s)) => BlockS
 
 instance BlockStorable [Char] where
     newtype Block [Char] = StringStorage (A.Array Int [Char])
+    newtype BlockIO [Char] = StringStorageIO (AIO.IOArray Int [Char])
+
+    newM size = StringStorageIO <$> AIO.newArray (0, size - 1) defaultBlockElement
+
+    indexM (StringStorageIO a) i = AIO.readArray a i
+    updateM (StringStorageIO a) i e = AIO.writeArray a i e
+    lengthM (StringStorageIO a) = AIO.getBounds a >>= (\(0, maxIndex) -> return $! maxIndex + 1)
 
     {-# INLINE (#!) #-}
     (StringStorage storage) #! index = storage ! index
@@ -122,6 +143,12 @@ instance NFData (Block [Char]) where
 
 instance BlockStorable Int where
     newtype Block Int = IntStorage (V.Vector Int)
+    newtype BlockIO Int = IntStorageIO (MV.IOVector Int)
+
+    newM size = IntStorageIO <$> MV.replicate size defaultBlockElement
+    indexM (IntStorageIO a) i = MV.unsafeRead a i
+    updateM (IntStorageIO a) i e = MV.unsafeWrite a i e
+    lengthM (IntStorageIO a) = return (MV.length a)
 
     {-# INLINE (#!) #-}
     (IntStorage storage) #! index = storage V.! index
@@ -164,6 +191,12 @@ instance NFData (Block Int) where
 
 instance BlockStorable Double where
     newtype Block Double = DoubleStorage (V.Vector Double)
+    newtype BlockIO Double = DoubleStorageIO (MV.IOVector Double)
+
+    newM size = DoubleStorageIO <$> MV.replicate size defaultBlockElement
+    indexM (DoubleStorageIO a) i = MV.unsafeRead a i
+    updateM (DoubleStorageIO a) i e = MV.unsafeWrite a i e
+    lengthM (DoubleStorageIO a) = return (MV.length a)
 
     {-# INLINE (#!) #-}
     (DoubleStorage storage) #! index = storage V.! index

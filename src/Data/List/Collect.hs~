@@ -1,0 +1,4 @@
+module Data.List.Collect where
+
+import Data.List
+
