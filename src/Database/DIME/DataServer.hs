@@ -4,11 +4,11 @@ module Database.DIME.DataServer
      dataServerMain, dataServerSimpleClient
     ) where
 import qualified  Control.Exception as E
+import Control.Applicative
 import Control.Exception.Base
 import Control.Monad
 import Control.Concurrent
 import Control.Concurrent.STM
-import Control.Concurrent.SampleVar
 import Control.Seq
 
 import qualified Data.ByteString as SB
@@ -129,13 +129,13 @@ dataServerMain coordinatorName localAddress = do
           \s -> do
             let zmqName = PeerName $ "tcp://" ++ hostName ++ ":" ++ show dataPort
             untilTerm $ do
-                  state <- readTVarIO stateVar
-                  sendOneRequest s (Peers.UpdateInfo zmqName $ ServerState.getBlockCount state) $
-                        (\response ->
-                             case response of
-                               Peers.InfoRequest -> return () -- should do something here
-                               _ -> return ())
-                  threadDelay keepAliveTime
+              blockCount <- withMVar stateVar (return . ServerState.getBlockCount)
+              sendOneRequest s (Peers.UpdateInfo zmqName blockCount) $
+                (\response ->
+                  case response of
+                    Peers.InfoRequest -> return () -- should do something here
+                    _ -> return ())
+              threadDelay keepAliveTime
 
     dumpData stateVar = ServerState.dumpState stateVar
 
@@ -189,34 +189,26 @@ dataServerMain coordinatorName localAddress = do
             infoM moduleName $ "Got command: " ++ show cmd
             case cmd of
               RunQuery key txt -> doRunQuery c coordinatorName key txt -- this runs in the IO monad, non-atomically
-              _ -> do
-                (response, state') <- atomically $ do
-                    state <- readTVar stateVar
-                    (response, !newState) <- case cmd of -- Parse the command
-                                FetchRows tableId rowIds columnIds ->
-                                    doFetchRows tableId (expandRowIds rowIds) columnIds state
-                                UpdateRows tableId rowIds columnIds values ->
-                                    doUpdateRows tableId rowIds columnIds values state
-                                -- Block commands
-                                NewBlock blockSpec startRowId endRowId columnType ->
-                                    doNewBlock blockSpec startRowId endRowId columnType state
-                                DeleteBlock blockSpec ->
-                                    doDeleteBlock blockSpec state
-                                BlockInfo blockSpec ->
-                                    doBlockInfo blockSpec state
-                                Map op inputs output ->
-                                    doMap op inputs output state
-                                collapseOp@Collapse {} ->
-                                    doCollapse collapseOp state
-                                ForceComputation blockSpec ->
-                                    doForceComputation blockSpec state
-                    case newState of
-                      Just state' -> do
-                          writeTVar stateVar state'
-                          return (response, state')
-                      Nothing -> return (response, state)
-                E.evaluate (state' `using` rseq)
-                return response
+              _ -> modifyMVar stateVar $ \state ->do
+                (response, !newState) <- case cmd of -- Parse the command
+                  FetchRows tableId rowIds columnIds ->
+                    doFetchRows tableId (expandRowIds rowIds) columnIds state
+                  UpdateRows tableId rowIds columnIds values ->
+                    doUpdateRows tableId rowIds columnIds values state
+                  -- Block commands
+                  NewBlock blockSpec startRowId endRowId columnType ->
+                    doNewBlock blockSpec startRowId endRowId columnType state
+                  DeleteBlock blockSpec ->
+                    doDeleteBlock blockSpec state
+                  BlockInfo blockSpec ->
+                    doBlockInfo blockSpec state
+                  Map op inputs output ->
+                    doMap op inputs output state
+                  collapseOp@Collapse {} ->
+                    doCollapse collapseOp state
+                  ForceComputation blockSpec ->
+                    doForceComputation blockSpec state
+                return (maybe state id newState, response)
 
     defaultProgramCellCount = 4096
 
@@ -250,88 +242,90 @@ dataServerMain coordinatorName localAddress = do
                errorM moduleName $ "Exception during Query: " ++ show e
                return $ Fail $ show e)
 
-    doFetchRows tableId rowIds columnIds state =
-        let values = map fetchRow rowIds
-            fetchRow rowId = map (fetchColumn rowId) columnIds
-            fetchColumn rowId columnId = ServerState.fetchColumnForRow tableId columnId rowId state
+    doFetchRows tableId rowIds columnIds state = do
+      let -- Make sure supplied data are valid
+          validTable = ServerState.hasTable tableId state
+          validColumns = all (\c -> ServerState.hasColumn tableId c state) columnIds
+      rowsExist <- concat <$> mapM (\c -> mapM (\r -> ServerState.hasRow tableId c r state) rowIds) columnIds
+      if validTable && validColumns && all id rowsExist
+        then do
+          let fetchRow rowId = mapM (fetchColumn rowId) columnIds
+              fetchColumn rowId columnId = ServerState.fetchColumnForRow tableId columnId rowId state
+          values <- mapM fetchRow rowIds
+          return (FetchRowsResponse values, Nothing)
+        else return (InconsistentArguments, Nothing)
 
-            -- Make sure supplied data are valid
-            validTable = ServerState.hasTable tableId state
-            validColumns = all (\c -> ServerState.hasColumn tableId c state) columnIds
-            validRows = all (\c -> all (\r -> ServerState.hasRow tableId c r state) rowIds) columnIds
+    doUpdateRows tableId rowIds columnIds values state = do -- Basic idea here is to update each column one at a time
+      let values' = map snd $ sortBy (compare `on` fst) $ zip rowIds values -- Reorder the values so that they correspond to rowIds in ascending order (makes it easier to group them)
+          rowIds' = sort rowIds
 
-            -- Make sure tables exist first, then columns, then rows
-            validTablesColumnsAndRows = validTable && validColumns && validRows
-        in -- Make sure all rows and columns exist
-          if validTablesColumnsAndRows
-          then return (FetchRowsResponse values, Just state)
-          else return (InconsistentArguments, Nothing)
+          columnValues = transpose values' -- Put values from a list of row values into a list of column values
+          columnTypes = map ((withColumnValue typeOf).head) columnValues
 
-    doUpdateRows tableId rowIds columnIds values state = -- Basic idea here is to update each column one at a time
-        let values' = map snd $ sortBy (compare `on` fst) $ zip rowIds values -- Reorder the values so that they correspond to rowIds in ascending order (makes it easier to group them)
-            rowIds' = sort rowIds
-
-            columnValues = transpose values' -- Put values from a list of row values into a list of column values
-            columnTypes = map ((withColumnValue typeOf).head) columnValues
-
-            idsAndValues = zip columnIds columnValues
-            updateRows (columnId, columnValues) st = ServerState.updateRows tableId columnId rowIds' columnValues st
-            state' = foldr updateRows state idsAndValues
+          idsAndValues = zip columnIds columnValues
 
             -- Check if the values provided are all of the same type
-            typeCheckColumn typeRep values = all (\x -> typeRep == withColumnValue typeOf x) values
-            valuesAreSane = all id $ map (uncurry typeCheckColumn) $ zip columnTypes columnValues
-        in case valuesAreSane of
-            False -> return (InconsistentTypes, Nothing)
-            True -> do
-              catchSTM (state' `seq` return (Ok, Just state')) (\(E.SomeException e) -> return (Fail $ show e, Nothing))
+          typeCheckColumn typeRep values = all (\x -> typeRep == withColumnValue typeOf x) values
+          valuesAreSane = all id $ map (uncurry typeCheckColumn) $ zip columnTypes columnValues
+
+          updateRows (columnId, columnValues) st = ServerState.updateRows tableId columnId rowIds' columnValues st
+      if valuesAreSane
+        then do
+          state' <- foldl (>>=) (return state) (map updateRows idsAndValues)
+          return (Ok, Just state')
+        else return (InconsistentTypes, Nothing)
 
     doNewBlock blockSpec@(BlockSpec tableId columnId blockId) startRowId endRowId columnType state =
-        let newBlock = ServerState.emptyBlockFromType columnType
-            resizedBlock = ServerState.modifyGenericBlock (const startRowId)
-                           (resize $ 1 + endRowId .- startRowId) newBlock
-            newState = ServerState.establishRowMapping (tableId, columnId) (startRowId, endRowId) blockId $
-                       ServerState.insertBlock blockSpec resizedBlock state
-            a .- b = (fromIntegral a) - (fromIntegral b)
-        in
-          if ServerState.hasBlock blockSpec state then
-              return (BlockAlreadyExists, Nothing)
-          else
-            return (Ok, Just newState)
+      if ServerState.hasBlock blockSpec state
+      then return (BlockAlreadyExists, Nothing)
+      else do
+        let a .- b = (fromIntegral a) - (fromIntegral b)
+        newBlock <- ServerState.emptyBlockFromType startRowId (1 + endRowId .- startRowId) columnType
+        newState <- ServerState.insertBlock blockSpec newBlock state >>=
+                    ServerState.establishRowMapping (tableId, columnId) (startRowId, endRowId) blockId
+        return (Ok, Just newState)
 
     doBlockInfo blockSpec state =
-        if ServerState.hasBlock blockSpec state then
-            let blockInfo = ServerState.getBlockInfo blockSpec state
-            in return (BlockInfoResponse blockInfo, Just state)
-         else
+        if ServerState.hasBlock blockSpec state
+          then do
+            blockInfo <- ServerState.getBlockInfo blockSpec state
+            return (BlockInfoResponse blockInfo, Just state)
+          else
             return (BlockDoesNotExist, Nothing)
 
     doDeleteBlock blockSpec state =
-        if ServerState.hasBlock blockSpec state then
-            return (Ok, Just $ ServerState.deleteBlock blockSpec state)
-         else
-             return (BlockDoesNotExist, Nothing)
+      if ServerState.hasBlock blockSpec state
+        then do
+          ServerState.deleteBlock blockSpec state
+          return (Ok, Nothing)
+        else return (BlockDoesNotExist, Nothing)
 
-    doMap op inputs output state =
-        let allInputsExist = all (flip ServerState.hasBlock state) inputs
-        in if allInputsExist then
-               case ServerState.mapServerBlock op inputs output state of
-                 Nothing -> return (InconsistentTypes, Nothing)
-                 Just state' ->
-                     let blockInfo = ServerState.getBlockInfo output state'
-                     in return (MapResponse (BI.blockType blockInfo), Just state')
-           else return (BlockDoesNotExist, Nothing)
+    doMap op inputs output state = do
+      let allInputsExist = all (flip ServerState.hasBlock state) inputs
+      if allInputsExist
+        then do
+             mapResult <- ServerState.mapServerBlock op inputs output state
+             case mapResult of
+               Left _ -> return (InconsistentTypes, Nothing) -- TODO use error parameter
+               Right state' -> do
+                 blockInfo <- ServerState.getBlockInfo output state'
+                 return (MapResponse (BI.blockType blockInfo), Just state')
+        else return (BlockDoesNotExist, Nothing)
 
     doCollapse collapseOp@Collapse {collapseBlockSpec} state =
-        if ServerState.hasBlock collapseBlockSpec state
-           then case ServerState.collapseServerBlock collapseOp state of
-                  Nothing -> return (InconsistentTypes, Nothing)
-                  Just state' -> return (Ok, Just state')
-           else return (BlockDoesNotExist, Nothing)
+      if ServerState.hasBlock collapseBlockSpec state
+        then do
+          collapseResult <- ServerState.collapseServerBlock collapseOp state
+          case collapseResult of
+            Left _ -> return (InconsistentTypes, Nothing) -- TODO use error parameter
+            Right state' -> return (Ok, Just state')
+        else return (BlockDoesNotExist, Nothing)
 
     doForceComputation blockSpec state =
-        if ServerState.hasBlock blockSpec state then
-            return (Ok, Just $ ServerState.forceCompute blockSpec state)
+      if ServerState.hasBlock blockSpec state
+        then do
+          ServerState.forceCompute blockSpec state
+          return (Ok, Nothing)
         else return (BlockDoesNotExist, Nothing)
 
 {-| Implements a simple client to the server above.

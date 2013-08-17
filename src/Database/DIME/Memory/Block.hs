@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns, TypeFamilies, FlexibleInstances, ExistentialQuantification, RankNTypes, FlexibleContexts #-}
+{-# LANGUAGE BangPatterns, TypeFamilies, FlexibleInstances, ExistentialQuantification, RankNTypes, FlexibleContexts, DeriveDataTypeable, StandaloneDeriving #-}
 module Database.DIME.Memory.Block
     (
      ColumnValue(..),
@@ -48,7 +48,7 @@ blockLength = 65536 -- blocks store 65k entries
     The s type is the storage type
     The d type is the data type stored in the storage
 -}
-class (Show s, Read s, Binary s, Typeable s, JSON s, NFData (Block s)) => BlockStorable s where
+class (Show s, Read s, Binary s, Typeable s, JSON s, NFData (Block s), Typeable1 BlockIO) => BlockStorable s where
     data Block s
     data BlockIO s
 
@@ -58,6 +58,7 @@ class (Show s, Read s, Binary s, Typeable s, JSON s, NFData (Block s)) => BlockS
     updateM :: BlockIO s -> Int -> s -> IO ()
     lengthM :: BlockIO s -> IO Int
     forceComputeM :: BlockIO s -> IO ()
+    toListM :: BlockIO s -> IO [s]
     freeze :: BlockIO s -> IO (Block s)
     thaw :: Block s -> IO (BlockIO s)
 
@@ -102,6 +103,8 @@ class (Show s, Read s, Binary s, Typeable s, JSON s, NFData (Block s)) => BlockS
 
     forceCompute :: Block s -> Block s
     forceCompute x = x -- for future
+
+deriving instance Typeable1 BlockIO
 
 instance BlockStorable [Char] where
     newtype Block [Char] = StringStorage (A.Array Int [Char])

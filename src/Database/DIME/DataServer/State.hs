@@ -222,11 +222,11 @@ restoreStateFromChunks state@DataServerState{ getChunkDir = chunkDir} = do
 getBlockCount :: DataServerState -> Int
 getBlockCount st = M.size $ getBlocks st
 
-emptyBlockFromType :: Int -> B.ColumnType -> IO GenericBlock
-emptyBlockFromType size columnType = case columnType of
-  B.IntColumn -> GenericBlock (BlockRowID 0) <$> (B.newM size :: IO (B.BlockIO Int))
-  B.StringColumn -> GenericBlock (BlockRowID 0) <$> (B.newM size :: IO (B.BlockIO String))
-  B.DoubleColumn -> GenericBlock (BlockRowID 0) <$> (B.newM size :: IO (B.BlockIO Double))
+emptyBlockFromType :: BlockRowID -> Int -> B.ColumnType -> IO GenericBlockIO
+emptyBlockFromType firstRow size columnType = case columnType of
+  B.IntColumn -> GenericBlockIO firstRow <$> (B.newM size :: IO (B.BlockIO Int))
+  B.StringColumn -> GenericBlockIO firstRow <$> (B.newM size :: IO (B.BlockIO String))
+  B.DoubleColumn -> GenericBlockIO firstRow <$> (B.newM size :: IO (B.BlockIO Double))
 
 -- | Insert the block but also insert the column into the table
 insertBlock :: BlockSpec -> GenericBlockIO -> DataServerState -> IO DataServerState
@@ -254,37 +254,37 @@ hasColumn tableId columnId DataServerState { getTables = tables } =
          Nothing -> error "Table not found"
          Just columnSet -> S.member columnId columnSet
 
-hasRow :: TableID -> ColumnID -> BlockRowID -> DataServerState -> Bool
+hasRow :: TableID -> ColumnID -> BlockRowID -> DataServerState -> IO Bool
 hasRow tableId columnId rowId DataServerState { getRowMappings = rowMappings} =
     let rowMappingResult = M.lookup (tableId, columnId) rowMappings
     in case rowMappingResult of
-         Nothing -> error "Cannot find table and column pair"
-         Just rowMapping ->
-             case DIT.lookup rowId rowMapping of
-               Nothing -> False
-               _ -> True
+         Nothing -> fail "Cannot find table and column pair"
+         Just rowMappingVar -> do
+           withMVar rowMappingVar $ \rowMapping ->
+             return $! isJust (DIT.lookup rowId rowMapping)
 
 deleteBlock :: BlockSpec -> DataServerState -> IO DataServerState
 deleteBlock blockSpec@(BlockSpec tableId columnId _) s = do
-    let blockInfo = getBlockInfo blockSpec s
-        s' = s { getBlocks = M.delete blockSpec $ getBlocks s,
+    let s' = s { getBlocks = M.delete blockSpec $ getBlocks s,
                  getModifiedBlocks = S.insert blockSpec $ getModifiedBlocks s }
+    blockInfo <- getBlockInfo blockSpec s
     case M.lookup (tableId, columnId) (getRowMappings s) of
       Nothing -> return s'
       Just rowMappingVar -> do
         modifyMVar_ rowMappingVar $ return . DIT.delete (firstRow blockInfo, lastRow blockInfo)
         return s'
 
+withAllMVars :: [MVar a] -> ([a] -> IO b) -> IO b
+withAllMVars mvars action = doWithAllMVars mvars id action
+  where doWithAllMVars [] a action = action (a [])
+        doWithAllMVars (lockVar:locks) a action = do
+          withMVar lockVar $ \lock ->
+            doWithAllMVars locks (a . (lock:)) action
+
 -- | The block id list should be sorted
 withBlocks :: DataServerState -> [BlockSpec] -> ([GenericBlockIO] -> IO a) -> IO a
-withBlocks state blocks action = startLocking blocks id action
-  where startLocking [] a action = action (a [])
-        startLocking (blockId:blockIds) a action = do
-          let blockVar = getBlock blockId
-          withMVar blockVar $ \block ->
-            startLocking blockIds (a . (blockId:)) action
-
-        getBlock blockSpec = fromJust . M.lookup blockSpec $ getBlocks state
+withBlocks state blocks action = withAllMVars (map getBlock blocks) action
+  where getBlock blockSpec = fromJust . M.lookup blockSpec $ getBlocks state
 
 withBlocksUnsorted :: DataServerState -> [BlockSpec] -> ([GenericBlockIO] -> IO a) -> IO a
 withBlocksUnsorted state blocks action = do
@@ -298,26 +298,28 @@ withBlocksUnsorted state blocks action = do
 -- | The columns must have the correct type or bad things will happen!
 updateRows :: TableID -> ColumnID -> [BlockRowID] -> [B.ColumnValue] -> DataServerState -> IO DataServerState
 updateRows tableId columnId rowIds values state = do
-    let Just rowMappings = M.lookup (tableId, columnId) $ getRowMappings state
-        blocksIdsAndValues = zip (map blockIdForRow rowIds) (zip rowIds values)
-        blockIdForRow rowId = fromJust $ DIT.lookup rowId rowMappings
+    let Just rowMappingsVar = M.lookup (tableId, columnId) $ getRowMappings state
+    blockIds <- withMVar rowMappingsVar $ \rowMappings -> do
+      let blockIdForRow rowId = fromJust $ DIT.lookup rowId rowMappings
+      return (map blockIdForRow rowIds)
+    let blocksIdsAndValues = zip blockIds (zip rowIds values)
         blockUpdateDescrs = collect blocksIdsAndValues -- Group rows from the same block together, returns them in sorted order
 
         updateBlock (blockId, block) idsAndValues = do
           let blockStartIndex = genericFirstRowIO block
               rowIdsAndValues = map (\(x, B.ColumnValue y) -> (fromIntegral $ x - blockStartIndex, unsafeCoerce y)) idsAndValues
               blockSpec = BlockSpec tableId columnId blockId
-              typeCheck block = genericTypeOf block == (B.withColumnValue typeOf (snd . head $ idsAndValues))
+              typeCheck block = genericTypeOfIO block == (B.withColumnValue typeOf (snd . head $ idsAndValues))
           if typeCheck block
             then do
-              mapM_ (uncurry (B.updateM block)) rowIdsAndValues
+              withGenericBlockIO (\block -> mapM_ (uncurry (B.updateM block)) rowIdsAndValues) block
             else fail "Incorrect type supplied for block"
 
     -- We need to lock each block first
     withBlocks state (map (\(blockId,_) -> BlockSpec tableId columnId blockId) blocksIdsAndValues) $ \blocks ->
-      let blocksIdsAndValues' = zip (zip (map fst blocksIdsAndValues) blocks) (map snd blocksIdsAndValues)
-      in mapM_ (uncurry updateBlock) blocksIdsAndValues
-    return state { getModifiedBlocks = S.fromList (map fst blocksIdsAndValues) `S.union` getModifiedBlocks state}
+      let blockUpdateDescrs' = zip (zip (map fst blockUpdateDescrs) blocks) (map snd blockUpdateDescrs)
+      in mapM_ (uncurry updateBlock) blockUpdateDescrs'
+    return state { getModifiedBlocks = S.fromList (map (\blockId -> BlockSpec tableId columnId blockId) blockIds) `S.union` getModifiedBlocks state}
 
 fetchColumnForRow :: TableID -> ColumnID -> BlockRowID -> DataServerState -> IO B.ColumnValue
 fetchColumnForRow tableId columnId rowId state = do
@@ -335,8 +337,8 @@ getBlockInfo blockSpec DataServerState {getBlocks = blocks} = do
     withMVar blockVar $ \block -> do
       let firstRow = genericFirstRowIO block
       blockLength <- fromIntegral <$> genericLengthIO block
-      BI.empty { firstRow = firstRow, lastRow = firstRow + blockLength - BlockRowID 1,
-                 blockType = B.typeRepToColumnType $ genericTypeOfIO block }
+      return (BI.empty { firstRow = firstRow, lastRow = firstRow + blockLength - BlockRowID 1,
+                         blockType = B.typeRepToColumnType $ genericTypeOfIO block })
 
 forceCompute :: BlockSpec -> DataServerState -> IO ()
 forceCompute blockSpec st =
@@ -347,48 +349,54 @@ forceCompute blockSpec st =
 mapServerBlock :: MapOperation -> [BlockSpec] -> BlockSpec -> DataServerState -> IO (Either String DataServerState)
 mapServerBlock op [] _ state = return (Left "not enough arguments to map operation")
 mapServerBlock op inputSpecs output@(BlockSpec tableId columnId blockId) state = do
-    let firstBlockType = genericTypeOfIO $ head inputSpecs
-        firstRow = genericFirstRowIO $ head inputSpecs
-        blocksTypeCheck = all ((== firstBlockType) . genericTypeOfIO) inputSpecs
-
+  res <- withBlocksUnsorted state inputSpecs $ \blocks -> do
+    let firstBlockType = genericTypeOfIO $ head blocks
+        firstRow = genericFirstRowIO $ head blocks
+        blocksTypeCheck = all ((== firstBlockType) . genericTypeOfIO) blocks
     if blocksTypeCheck
       then do
-        frozenBlocks <- withBlocksUnsorted state inputSpecs $ mapM (withGenericBlockIO B.freeze)
+       frozenBlocks <- mapM genericFreeze blocks
+       return (Just (frozenBlocks, firstBlockType, firstRow))
+      else return Nothing
+  case res of
+    Nothing -> return (Left "Cannot map blocks of different types")
+    Just (frozenBlocks, firstBlockType, firstRow) -> do
+      let createBlock = createBlockFromType firstBlockType
 
-        let createBlock = createBlockFromType firstBlockType
-
-            createBlockFromType t
-              | t == typeOf (undefined :: Int) =
-                let res = mapBlock op $ map (fromJust . genericCoerceInt) frozenBlocks
-                in maybe Nothing (Just . GenericBlock) res
-              | t == typeOf (undefined :: Double) =
-                let res = mapBlock op $ map (fromJust . genericCoerceDouble) frozenBlocks
-                in maybe Nothing (Just . GenericBlock) res
-              | t == typeOf (undefined :: String) =
-                let res = mapBlock op $ map (fromJust . genericCoerceString) frozenBlocks
-                in maybe Nothing (Just . GenericBlock) res
-        newBlock <- B.thaw createBlock
-        case newBlock of
-          Nothing -> return (Left "Map failed")
-          Just newBlock' -> do
-            state' <- insertBlock output newBlock' state
-            Right <$> establishRowMapping (tableId, columnId) (firstRow, firstRow + BlockRowID (fromIntegral . genericLengthIO newBlock')) blockId
-      else Left "Cannot map blocks of different types"
+          createBlockFromType t
+            | t == typeOf (undefined :: Int) =
+              let res = mapBlock op $ map (fromJust . genericCoerceInt) frozenBlocks
+              in maybe Nothing (Just . GenericBlock firstRow) res
+            | t == typeOf (undefined :: Double) =
+              let res = mapBlock op $ map (fromJust . genericCoerceDouble) frozenBlocks
+              in maybe Nothing (Just . GenericBlock firstRow) res
+            | t == typeOf (undefined :: String) =
+              let res = mapBlock op $ map (fromJust . genericCoerceString) frozenBlocks
+              in maybe Nothing (Just . GenericBlock firstRow) res
+      case createBlock of
+        Nothing -> return (Left "Map failed")
+        Just newBlock -> do
+          newBlock' <- genericThaw newBlock
+          state' <- insertBlock output newBlock' state
+          length <- fromIntegral <$> genericLengthIO newBlock'
+          Right <$> establishRowMapping (tableId, columnId) (firstRow, firstRow + length) blockId state
 
 collapseServerBlock :: Command -> DataServerState -> IO (Either String DataServerState)
 collapseServerBlock Collapse {..} state = do
     let Just genericInputBlockVar = M.lookup collapseBlockSpec $ getBlocks state
-    (inputBlock, blockType, firstRow) <- withMVar genericInputBlockVar $ \block -> do
-      frozen <- withGenericBlockIO B.freeze
-      return (frozen, genericTypeOfIO block, genericFirstRowIO block)
-    let finalInputBlock = inputBlock `B.append` (B.fromList collapseBlockSuffix)
-    case collapseBlock collapseOperation collapseLength finalInputBlock of
-      Nothing -> return (Left "collapse failed")
-      Just x -> do
-        let resultBlock = GenericBlock firstRow x
-            BlockSpec resultTableId resultColumnId resultBlockId = collapseResultBlock
-        state' <- insertBlock collapseResultBlock resultBlock state
-        Right <$> establishRowMapping (resultTableId, resultColumnId) (firstRow, firstRow + BlockRowID(fromIntegral $ genericLength resultBlock)) resultBlockId state'
+    inputBlock <- withMVar genericInputBlockVar genericFreeze
+    let blockType = genericTypeOf inputBlock
+        firstRow = genericFirstRow inputBlock
+    usingGenericBlock inputBlock $ \typedBlock -> do
+      let finalInputBlock = typedBlock `B.append` (B.fromList collapseBlockSuffix)
+      case collapseBlock collapseOperation collapseLength finalInputBlock of
+        Nothing -> return (Left "collapse failed")
+        Just x -> do
+          let resultBlock = GenericBlock firstRow x
+              BlockSpec resultTableId resultColumnId resultBlockId = collapseResultBlock
+          thawedBlock <- genericThaw resultBlock
+          state' <- insertBlock collapseResultBlock thawedBlock state
+          Right <$> establishRowMapping (resultTableId, resultColumnId) (firstRow, firstRow + BlockRowID(fromIntegral $ genericLength resultBlock)) resultBlockId state'
 
 establishRowMapping :: (TableID, ColumnID) -> (BlockRowID, BlockRowID) -> BlockID -> DataServerState -> IO DataServerState
 establishRowMapping blockKey bounds blockId st@(DataServerState {getRowMappings = rowMappings}) = do
@@ -400,7 +408,7 @@ establishRowMapping blockKey bounds blockId st@(DataServerState {getRowMappings 
         newDit <- newMVar (DIT.insert bounds blockId DIT.empty)
         return (st { getRowMappings = M.insert blockKey newDit (getRowMappings st) })
       Just rowMappingVar -> do
-        modifyMVar rowMappingVar (return . DIT.insert bounds blockId)
+        modifyMVar_ rowMappingVar (return . DIT.insert bounds blockId)
         return st
 
 genericLength :: GenericBlock -> Int
@@ -439,19 +447,19 @@ genericFreeze (GenericBlockIO l bIO) = do
   b <- B.freeze bIO
   return (GenericBlock l b)
 
-genericCoerceInt :: GenericBlockIO -> Maybe (B.BlockIO Int)
+genericCoerceInt :: GenericBlock -> Maybe (B.Block Int)
 genericCoerceInt block
-    | genericTypeOfIO block == typeOf (undefined :: Int) = Just $ withGenericBlockIO unsafeCoerce block
+    | genericTypeOf block == typeOf (undefined :: Int) = Just $ withGenericBlock unsafeCoerce block
     | otherwise = Nothing
 
-genericCoerceDouble :: GenericBlockIO -> Maybe (B.BlockIO Double)
+genericCoerceDouble :: GenericBlock -> Maybe (B.Block Double)
 genericCoerceDouble block
-    | genericTypeOfIO block == typeOf (undefined :: Double) = Just $ withGenericBlockIO unsafeCoerce block
+    | genericTypeOf block == typeOf (undefined :: Double) = Just $ withGenericBlock unsafeCoerce block
     | otherwise = Nothing
 
-genericCoerceString :: GenericBlockIO -> Maybe (B.BlockIO String)
+genericCoerceString :: GenericBlock -> Maybe (B.Block String)
 genericCoerceString block
-    | genericTypeOfIO block == typeOf (undefined :: String) = Just $ withGenericBlockIO unsafeCoerce block
+    | genericTypeOf block == typeOf (undefined :: String) = Just $ withGenericBlock unsafeCoerce block
     | otherwise = Nothing
 
 -- | Apply transformation functions on the fields of a generic block
@@ -465,15 +473,13 @@ dumpState stateVar = do
   let modifiedBlocks = S.toList $ getModifiedBlocks state
       allModifiedColumns = L.sort $ map (\(BlockSpec tableId columnId _) -> (tableId, columnId)) modifiedBlocks
       modifiedColumns = L.nub allModifiedColumns
+      columnVars = catMaybes (map (flip M.lookup (getRowMappings state)) modifiedColumns)
       updatedBlocks = map (\blockSpec ->
                             case M.lookup blockSpec (getBlocks state) of
                               Nothing -> error $ "Deleted " ++ show blockSpec ++ " not handled"
                               Just block -> (blockSpec, block)) modifiedBlocks
-      updatedColumns = map (\columnSpec ->
-                             case M.lookup columnSpec (getRowMappings state) of
-                               Nothing -> error $ "Deleted " ++ show columnSpec ++ " not handled"
-                               Just rowMapping -> (columnSpec, DIT.assocs rowMapping)) modifiedColumns
       allBlocks = M.keys (getBlocks state)
+  updatedColumns <- withAllMVars columnVars $ \columns -> return (zip modifiedColumns (map DIT.assocs columns))
   putMVar stateVar $ state {getModifiedBlocks = S.empty} -- empty out modified blocks
 
   -- the row ranges of modified columns should be written out again
@@ -483,11 +489,11 @@ dumpState stateVar = do
   forM updatedBlocks $ -- write out updated block data
        (\(updatedBlockSpec@(BlockSpec tableId columnId blockId), updatedBlockVar) ->
            withMVar updatedBlockVar $ \updatedBlock -> do
+             blockData <- withGenericBlockIO ((fmap Bin.encode) . B.toListM) updatedBlock
              let fileName = blockFileName chunkDir updatedBlockSpec
-                 blockData = withGenericBlock (Bin.encode . B.toList) updatedBlock
                  blockDataTxt = B64.encode $ BS.concat $ LBS.toChunks $ GZip.compress $ blockData
-
-                 endRow =  (fromIntegral $ genericFirstRowIO updatedBlock) + genericLengthIO updatedBlock - 1
+             updatedBlockLength <- genericLengthIO updatedBlock
+             let endRow =  (fromIntegral $ genericFirstRowIO updatedBlock) + updatedBlockLength - 1
                  jsonData = showJSON $ toJSObject [
                               ("tableId", showJSON tableId),
                               ("columnId", showJSON columnId),
@@ -503,8 +509,7 @@ dumpState stateVar = do
              writeFile fileName serializedJSON)
 
   forM updatedColumns $ -- write out updated columns
-       (\(updatedColumnSpec@(tableId, columnId), rowMappingsVar) ->
-         withMVar rowMappingsVar $ \rowMappings -> do
+       (\(updatedColumnSpec@(tableId, columnId), rowMappings) -> do
             let fileName = columnFileName chunkDir updatedColumnSpec -- output correct JSON data structure
                 jsonData = showJSON $ toJSObject [
                             ("columnId", showJSON $ columnId),

@@ -1,8 +1,10 @@
 module Main where
 
 import Control.Monad
+import Control.Concurrent
 
 import Database.DIME.Server
+import Database.DIME.Server.Config
 import Database.DIME.DataServer
 import Database.DIME.DataServer.Config
 import Database.DIME.Util
@@ -39,7 +41,8 @@ options = [ Option "d" ["debug"]
             "Show this help",
             Option "m" ["master"]
             (NoArg
-             (\opt -> return opt {optMaster = True})
+             (\opt -> return opt {optMaster = True}))
+            "Designate this node as master",
             Option "l" ["local-address"]
             (OptArg
              (\arg opt -> case arg of
@@ -61,16 +64,19 @@ main = do
   -- Run the actions on the options
   opts <- foldl (>>=) startOptions actions
 
-  coordinatorName <- case nonOptions of
-                       [] -> fail "A coordinator name must be passed into the program"
-                       x -> return $ head x
-
   let Options { optDebug = debug, optMaster = isMaster, optLocalAddress = localAddress } = opts
+
+  coordinatorName <- case nonOptions of
+                       [] -> if isMaster
+                                then return localAddress
+                                else fail "A coordinator name must be passed into the program"
+                       x -> return $ head x
   when debug $ setDebugMode
 
   when isMaster $ do
     initServerConfig
     forkIO serverMain
+    return ()
 
   -- Read config files
   initDataServerConfig
