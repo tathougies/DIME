@@ -139,7 +139,7 @@ module Database.DIME.Flow.Builtin where
                                    }
                     Peers.ObjectNotFound -> let TimeSeriesName txt = tsName
                                             in error $ "Could not find time series " ++ unpack txt
-                    _ -> error $ "Invalid response from " ++ serverName)
+                    _ -> error $ "Invalid response from " ++ show serverName)
 
     isTimeSeriesCollection :: GenericGData -> Bool
     isTimeSeriesCollection = checkType (typeName (undefined :: TimeSeriesCollection))

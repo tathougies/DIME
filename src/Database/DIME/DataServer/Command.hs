@@ -18,6 +18,8 @@ import Control.Monad
 
 import Language.Flow.Execution.Types -- for Binary Text intance
 
+import Network.Socket (SockAddr)
+
 import Text.JSON
 
 updateRowsTag, fetchRowsTag, newBlockTag, deleteBlockTag, blockInfoTag, mapTag, collapseTag, runQueryTag, forceComputationTag :: Int8
@@ -97,7 +99,7 @@ data Command = UpdateRows TableID [BlockRowID] [ColumnID] [[ColumnValue]] |
                --
                --    [`BlockDoesNotExist'] The block requested does not exist.
 
-               TransferBlock BlockSpec BlockSpec String |
+               TransferBlock BlockSpec BlockSpec SockAddr |
 
                Map MapOperation [BlockSpec] BlockSpec |
                Collapse {
@@ -112,7 +114,7 @@ data Command = UpdateRows TableID [BlockRowID] [ColumnID] [[ColumnValue]] |
                { -}
 
                RunQuery QueryKey T.Text
-             deriving (Show, Read)
+             deriving Show
 
 instance Binary Command where
     put (UpdateRows tableId rowIds columnIds columnValues) = do

@@ -58,7 +58,11 @@ class (Show s, Read s, Binary s, Typeable s, JSON s, NFData (Block s), Typeable1
     updateM :: BlockIO s -> Int -> s -> IO ()
     lengthM :: BlockIO s -> IO Int
     forceComputeM :: BlockIO s -> IO ()
+    forceComputeM b = return ()
     toListM :: BlockIO s -> IO [s]
+    toListM blockIO = do
+      length <- lengthM blockIO
+      mapM (indexM blockIO) [0..length - 1]
     freeze :: BlockIO s -> IO (Block s)
     thaw :: Block s -> IO (BlockIO s)
 
@@ -133,6 +137,9 @@ instance BlockStorable [Char] where
     slice b e (StringStorage v) = StringStorage $ A.listArray (0, e - b - 1) $ map (v A.!) [b..e-1]
     defaultBlockElement = ""
 
+    freeze (StringStorageIO a) = StringStorage <$> AIO.freeze a
+    thaw (StringStorage a) = StringStorageIO <$> AIO.thaw a
+
     toList (StringStorage a) = A.elems a
 
     resize newSize block
@@ -143,6 +150,19 @@ instance BlockStorable [Char] where
 
 instance NFData (Block [Char]) where
     rnf (StringStorage a) = rnf a
+
+freezeVector :: (MV.Unbox a, BlockStorable a) => BlockIO a -> IO (V.Vector a)
+freezeVector iov = do
+  l <- toListM iov
+  return (V.fromList l)
+
+thawVector :: (MV.Unbox a, BlockStorable a) => Block a -> IO (MV.IOVector a)
+thawVector v = do
+  let l = toList v
+      len = length v
+  iov <- MV.new len
+  mapM (uncurry (MV.write iov)) (zip [0..] l)
+  return iov
 
 instance BlockStorable Int where
     newtype Block Int = IntStorage (V.Vector Int)
@@ -163,6 +183,9 @@ instance BlockStorable Int where
     append (IntStorage prefix) (IntStorage suffix) = IntStorage $ prefix V.++ suffix
     slice b e (IntStorage v) = IntStorage $ V.slice b (e - b + 1) v
     defaultBlockElement = 0
+
+    freeze v = IntStorage <$> freezeVector v
+    thaw v = IntStorageIO <$> thawVector v
 
     toList (IntStorage v) = V.toList v
 
@@ -213,6 +236,9 @@ instance BlockStorable Double where
     defaultBlockElement = 0.0
 
     toList (DoubleStorage v) = V.toList v
+
+    freeze v = DoubleStorage <$> freezeVector v
+    thaw v = DoubleStorageIO <$> thawVector v
 
     resize newSize block
         | (Database.DIME.Memory.Block.length block) < newSize = case block of

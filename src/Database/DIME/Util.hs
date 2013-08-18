@@ -10,6 +10,10 @@ import Control.Exception
 import Data.Maybe
 
 import System.Log.Logger
+import System.Random (randomRIO)
+
+pick :: [a] -> IO a
+pick xs = randomRIO (0, length xs - 1) >>= return . (xs !!)
 
 runStatefulIOLoop :: a -> (a -> IO a)-> IO ()
 runStatefulIOLoop initialValue action = do

@@ -1,4 +1,4 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving, ScopedTypeVariables #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, ScopedTypeVariables, StandaloneDeriving #-}
 module Database.DIME.Server.State
     ( State(..), TimeSeriesName (..), ColumnName (..),
       TimeSeriesData(..), ColumnData(..), PeerName(..),
@@ -12,6 +12,7 @@ module Database.DIME.Server.State
       rebuildTimeSeriesMap
     ) where
 
+import Control.Applicative
 import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Concurrent.MVar
@@ -44,6 +45,8 @@ import Database.DIME.DataServer.Command
 import Database.DIME.Transport
 import Database.DIME
 
+import qualified Network.Socket as Net
+
 import System.Time
 import System.Directory
 import System.Log.Logger
@@ -55,8 +58,8 @@ moduleName = "Database.DIME.Server.State"
 blockSize = 65536
 
 -- | Data type for ZeroMQ peer name
-newtype PeerName = PeerName String
-    deriving (Show, Ord, Eq, IsString, JSON, Bin.Binary)
+newtype PeerName = PeerName Net.SockAddr
+    deriving (Show, Ord, Eq)
 -- | Data type of an index into a time series
 newtype TimeSeriesIx = TimeSeriesIx Int64
     deriving (Show, Ord, Eq, Num, Enum, JSON, Bin.Binary, Integral, Real)
@@ -137,11 +140,10 @@ getLeastUtilizedPeer peersInfo = do
       peerData <- readTVarIO peerVar
       return $ Just $ getPeerName peerData
 
-newServerState :: FilePath -> IO State
-newServerState configLocation = do
+newServerState :: Context IO -> FilePath -> IO State
+newServerState ctxt configLocation = do
   timeSeriessTVar <- newTVarIO Map.empty
   peersTVar <- newTVarIO $ PeersInfo Map.empty PSQ.empty
-  ctxt <- initTransport
   let baseState = ServerState configLocation timeSeriessTVar peersTVar ctxt
   readStateFromConfigFile baseState
 
@@ -401,6 +403,7 @@ appendRow timeSeriesName columnsAndValues state =
                                                                    _ -> maximum $ Map.keys $ getBlocks columnData
                                                     newBlockId = maxBlockId + (BlockID 1)
 
+                                                putStrLn ("Sending create message to " ++ show bestPeerName)
                                                 (startRowId, endRowId) <- createBlockOnPeer context bestPeerName tableId columnId
                                                                           newBlockId (fromIntegral rowIndex) (getColumnType columnData)
 
@@ -447,7 +450,7 @@ appendRow timeSeriesName columnsAndValues state =
           in sendRequest ctxt (Connect peer) newBlockCommand $
              (\(response :: Response) -> do
                   when (isFailure response) $
-                       liftIO $ warningM moduleName ("Failed creating block " ++ show blockId ++ " on " ++ peer)
+                       liftIO $ warningM moduleName ("Failed creating block " ++ show blockId ++ " on " ++ show peer)
                   return (fromIntegral beginRowId, fromIntegral endRowId))
 
       calculateBestPeer :: State -> ColumnData -> IO (Maybe PeerName)
@@ -596,3 +599,79 @@ instance JSON a => JSON (V.Vector a) where
     readJSON a = case readJSON a of
                    Ok x -> Ok $ V.fromList x
                    Error e -> Error e
+
+deriving instance JSON Net.PortNumber
+
+instance JSON PeerName where
+  showJSON (PeerName sockAddr) =
+    JSObject . toJSObject $ case sockAddr of
+      Net.SockAddrInet portNo hostAddr ->
+        [("t", showJSON "4"),
+         ("port", showJSON portNo),
+         ("host", showJSON hostAddr)]
+      Net.SockAddrInet6 portNo flowInfo hostAddr scope ->
+        [("t", showJSON "6"),
+         ("port", showJSON portNo),
+         ("host", showJSON hostAddr),
+         ("flow", showJSON flowInfo),
+         ("scope", showJSON scope)]
+      Net.SockAddrUnix file ->
+        [("t", showJSON "u"),
+         ("file", showJSON file)]
+  readJSON (JSObject objData') =
+    let objData = fromJSObject objData'
+        l fieldName = lookup fieldName objData
+    in case (l "type") of
+      Nothing -> Error "Missing 'type' field"
+      Just typ -> case readJSON typ of
+        Error _ -> Error "'type' field has wrong type"
+        Ok "u" -> case (l "file") of
+          Nothing -> Error "Missing 'file' field"
+          Just file -> case readJSON file of
+            Ok file -> Ok . PeerName $ Net.SockAddrUnix file
+            Error _ -> Error "'file' field has wrong type"
+        Ok "4" -> case (l "port", l "host") of
+          (Nothing, _) -> Error "Missing 'port' field"
+          (_, Nothing) -> Error "Missing 'host' field"
+          (Just port, Just host) -> case (readJSON port, readJSON host) of
+            (Ok port, Ok host) -> Ok .PeerName $ Net.SockAddrInet port host
+            (Error _, _) -> Error "'port field has wrong type"
+            (_, Error _) -> Error "'host' field has wrong type"
+        Ok "6" -> case (l "port", l "host", l "flow", l"scope") of
+          (Nothing, _, _, _) -> Error "Missing 'port' field"
+          (_, Nothing, _, _) -> Error "Missing 'host' field"
+          (_, _, Nothing, _) -> Error "Missing 'flow' field"
+          (_, _, _, Nothing) -> Error "Missing 'scope' field"
+          (Just port, Just host, Just flow, Just scope) ->
+            case (readJSON port, readJSON host, readJSON flow, readJSON scope) of
+              (Ok port, Ok host, Ok flow, Ok scope) ->
+                Ok . PeerName $ Net.SockAddrInet6 port flow host scope
+              (Error _, _, _, _) -> Error "'port' field has wrong type"
+              (_, Error _, _, _) -> Error "'flow' field has wrong type"
+              (_, _, Error _, _) -> Error "'host' field has wrong type"
+              (_, _, _, Error _) -> Error "'scope' field has wrong type"
+
+deriving instance Bin.Binary Net.PortNumber
+
+instance Bin.Binary PeerName where
+  put (PeerName socket) =
+    case socket of
+      Net.SockAddrInet portNo hostAddr -> do
+        Bin.put '4'
+        Bin.put portNo
+        Bin.put hostAddr
+      Net.SockAddrInet6 portNo flow hostAddr scope -> do
+        Bin.put '6'
+        Bin.put portNo
+        Bin.put flow
+        Bin.put hostAddr
+        Bin.put scope
+      Net.SockAddrUnix file -> do
+        Bin.put 'u'
+        Bin.put file
+  get = PeerName <$> do
+    tag <- Bin.get
+    case tag of
+      '4' -> Net.SockAddrInet <$> Bin.get <*> Bin.get
+      '6' -> Net.SockAddrInet6 <$> Bin.get <*> Bin.get <*> Bin.get <*> Bin.get
+      'u' -> Net.SockAddrUnix <$> Bin.get

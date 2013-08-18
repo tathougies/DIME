@@ -50,6 +50,8 @@ import Data.Typeable
 import Data.Function
 import Data.Char
 
+import Debug.Trace
+
 import System.IO.Unsafe
 import System.Directory
 import System.FilePath
@@ -314,11 +316,13 @@ updateRows tableId columnId rowIds values state = do
             then do
               withGenericBlockIO (\block -> mapM_ (uncurry (B.updateM block)) rowIdsAndValues) block
             else fail "Incorrect type supplied for block"
-
+    putStrLn (show blockUpdateDescrs)
     -- We need to lock each block first
     withBlocks state (map (\(blockId,_) -> BlockSpec tableId columnId blockId) blocksIdsAndValues) $ \blocks ->
       let blockUpdateDescrs' = zip (zip (map fst blockUpdateDescrs) blocks) (map snd blockUpdateDescrs)
-      in mapM_ (uncurry updateBlock) blockUpdateDescrs'
+      in do
+        mapM_ (uncurry updateBlock) blockUpdateDescrs'
+    putStrLn ("After " ++ show blockUpdateDescrs)
     return state { getModifiedBlocks = S.fromList (map (\blockId -> BlockSpec tableId columnId blockId) blockIds) `S.union` getModifiedBlocks state}
 
 fetchColumnForRow :: TableID -> ColumnID -> BlockRowID -> DataServerState -> IO B.ColumnValue
@@ -421,7 +425,9 @@ genericTypeOf :: GenericBlock -> TypeRep
 genericTypeOf = withGenericBlock (\x -> typeOf $ x #! 0)
 
 genericTypeOfIO :: GenericBlockIO -> TypeRep
-genericTypeOfIO (GenericBlockIO _ b) = head $ typeRepArgs (typeOf1 b)
+genericTypeOfIO (GenericBlockIO _ b) =
+  let rep = head $ typeRepArgs (typeOf (B.indexM b 0))
+  in trace (show (typeOf (B.indexM b 0))) rep
 
 genericFirstRow :: GenericBlock -> BlockRowID
 genericFirstRow (GenericBlock r _) = r

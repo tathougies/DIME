@@ -80,5 +80,6 @@ main = do
 
   -- Read config files
   initDataServerConfig
-
+  threadDelay 3000000
+  putStrLn "hello"
   dataServerMain coordinatorName localAddress

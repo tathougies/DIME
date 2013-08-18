@@ -82,7 +82,7 @@ fetchTimeSeries tsc columnName = do
               Peers.ObjectNotFound -> let TimeSeriesName tsName = tscName tsc
                                           ColumnName cName = columnName
                                       in error $ "Could not find column: " ++ unpack cName ++ " of " ++ unpack tsName
-              otherwise -> error $ "Invalid response from " ++ serverName)
+              otherwise -> error $ "Invalid response from " ++ show serverName)
 
 instance GData TimeSeries where
     typeName _ = fromString "TimeSeries"
@@ -142,11 +142,11 @@ mapBlock ctxt op timeSeriess resultBlock =
                let blockSpec = BlockSpec (tsTableId timeSeries) (tsColumnId timeSeries) blockId
                    PeerName source = head peers
                sendRequest ctxt (Connect mostPopularPeerTxt)
-                           (TransferBlock blockSpec blockSpec source) $
-                           \response ->
-                               case response of
-                                 Ok -> return ()
-                                 e -> fail $ "Inappropriate reply for block transfer: " ++ show e
+                 (TransferBlock blockSpec blockSpec source) $
+                 \response ->
+                 case response of
+                   Ok -> return ()
+                   e -> fail $ "Inappropriate reply for block transfer: " ++ show e
 
     sendRequest ctxt (Connect mostPopularPeerTxt)
                 (Map op blockSpecs resultBlock) $

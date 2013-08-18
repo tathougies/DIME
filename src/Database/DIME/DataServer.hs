@@ -1,7 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables, BangPatterns, ViewPatterns, RecordWildCards, NamedFieldPuns #-}
 module Database.DIME.DataServer
     (
-     dataServerMain, dataServerSimpleClient
+     dataServerMain --, dataServerSimpleClient
     ) where
 import qualified  Control.Exception as E
 import Control.Applicative
@@ -42,6 +42,8 @@ import Language.Flow.Compile
 import Language.Flow.Execution.Types
 import Language.Flow.Execution.GMachine
 
+import qualified Network.Socket as Net
+
 import qualified System.ZMQ3 as ZMQ
 import System.Log.Logger
 import System.Console.Haskeline hiding (throwTo)
@@ -73,7 +75,7 @@ threadsRef = unsafePerformIO $ newTVarIO S.empty
 
 runWithTermHandler :: IO () -> IO ()
 runWithTermHandler action =
-    E.catch action (\(e :: SigTermReceived) -> return ())
+    E.catch (forever action) (\(e :: SigTermReceived) -> return ())
 
 untilTerm :: IO () -> IO ()
 untilTerm action = do
@@ -92,8 +94,8 @@ termHandler = do
 
 dataServerMain :: String -> String -> IO ()
 dataServerMain coordinatorName localAddress = do
-  let coordinatorServerName = "tcp://" ++ coordinatorName ++ ":" ++ show coordinatorPort
-      coordinatorQueryDealerName = "tcp://" ++ coordinatorName ++ ":" ++ show queryBrokerPort
+  let coordinatorServerName = ipv4 (fromIntegral coordinatorPort) coordinatorName
+      coordinatorQueryDealerName = ipv4 (fromIntegral queryBrokerPort) coordinatorName
   infoM moduleName "DIME Data server starting up..."
   initFlowEngine
   mainThreadId <- myThreadId
@@ -103,31 +105,21 @@ dataServerMain coordinatorName localAddress = do
   stateVar <- ServerState.mkEmptyServerState "dime-data"
   infoM moduleName "DIME data loaded..."
   withContext $ \c -> do
-      requestSyncVar <- (newEmptyMVar :: IO (MVar ()))
-      querySyncVar <- (newEmptyMVar :: IO (MVar ()))
-      statusId <- forkIO $ statusClient stateVar coordinatorServerName localAddress c
-      distributorId <- forkIO $ requestDistributor c requestSyncVar
-      queryBrokerId <- forkIO $ queryBroker c coordinatorQueryDealerName querySyncVar
-      atomically $ modifyTVar threadsRef (S.insert statusId . S.insert distributorId)
-
       infoM moduleName "Waiting for request broker..."
 
-      takeMVar requestSyncVar
-      takeMVar querySyncVar
-
-      replicateM 3 $ launchMainLoop c stateVar coordinatorServerName
-      replicateM 3 $ launchQueryLoop c coordinatorServerName
+      forkIO (requestHandler c stateVar coordinatorServerName)
+      forkIO (queryHandler c stateVar coordinatorServerName)
 
       untilTerm $ saveDataPeriodically stateVar
       infoM moduleName "Going to dump data..."
-      dumpData stateVar
+      ServerState.dumpState stateVar
       exitWith ExitSuccess
       return ()
   where
-    statusClient stateVar coordinatorName hostName ctxt =
-        safelyWithSocket ctxt Req (Connect coordinatorName) $
+    statusClient stateVar coordinator hostName ctxt =
+        withAttachedSocket ctxt (Connect coordinator) $
           \s -> do
-            let zmqName = PeerName $ "tcp://" ++ hostName ++ ":" ++ show dataPort
+            let zmqName = PeerName $ ipv4 (fromIntegral dataPort) hostName
             untilTerm $ do
               blockCount <- withMVar stateVar (return . ServerState.getBlockCount)
               sendOneRequest s (Peers.UpdateInfo zmqName blockCount) $
@@ -137,55 +129,50 @@ dataServerMain coordinatorName localAddress = do
                     _ -> return ())
               threadDelay keepAliveTime
 
-    dumpData stateVar = ServerState.dumpState stateVar
+    requestHandler c stateVar coordinatorServerName =
+      withAttachedSocket c (bindingPort (fromIntegral dataPort)) $ \s -> do
+        forkIO $ statusClient stateVar coordinatorServerName localAddress c
+        forever $ do
+          (s', _) <- accept s
+          launchMainLoop c stateVar coordinatorServerName s'
+    queryHandler c stateVar coordinatorServerName =
+      withAttachedSocket c (bindingPort (fromIntegral queryBrokerPort)) $ \s -> forever $ do
+        (s', _) <- accept s
+        launchQueryLoop c coordinatorServerName s'
 
     saveDataPeriodically stateVar = do
       threadDelay dumpDataPeriod
-      dumpData stateVar
+      ServerState.dumpState stateVar
 
-    queryBroker c queryDealerName syncVar =
-      safelyWithSocket c Router (Connect queryDealerName) $ \routerS ->
-          safelyWithSocket c Dealer (Bind "inproc://queries") $ \dealerS -> do
-              putMVar syncVar ()
-              forkIO $ untilTerm $ tunnel routerS dealerS
-              untilTerm $ tunnel dealerS routerS
-
-    requestDistributor c syncVar =
-      safelyWithSocket c Router (Bind $ "tcp://127.0.0.1:" ++ show dataPort) $ \routerS ->
-          safelyWithSocket c Dealer (Bind "inproc://requests") $ \dealerS -> do
-              putMVar syncVar ()
-              forkIO $ untilTerm $ tunnel routerS dealerS
-              untilTerm $ tunnel dealerS routerS
-
-    launchMainLoop c stateVar coordinatorServerName = do
-      loopId <- forkIO $ mainLoop c stateVar coordinatorServerName
+    launchMainLoop c stateVar coordinatorServerName s = do
+      loopId <- forkIO $ mainLoop c stateVar coordinatorServerName s
       atomically $ modifyTVar threadsRef (S.insert loopId)
 
-    launchQueryLoop c coordinatorServerName = do
-      loopId <- forkIO $ queryLoop c coordinatorServerName
+    launchQueryLoop c coordinatorServerName s = do
+      loopId <- forkIO $ queryLoop c coordinatorServerName s
       atomically $ modifyTVar threadsRef (S.insert loopId)
 
-    queryLoop c coordinatorName = runWithTermHandler $ do
-        safelyWithSocket c Rep (Connect "inproc://queries") $
-               \s -> serveRequest s (return ()) $
-                     \(cmd :: Command) -> do
-                       launchQueryLoop c coordinatorName
-                       case cmd of
-                         RunQuery key txt -> doRunQuery c coordinatorName key txt
-                         _ -> return undefined
+    queryLoop c coordinatorName s = do
+      threadId <- myThreadId
+      runWithTermHandler $
+       serveRequest s (return ()) $
+       \(cmd :: Command) -> do
+         case cmd of
+           RunQuery key txt -> doRunQuery c coordinatorName key txt
+           _ -> return undefined
+      atomically $ modifyTVar threadsRef (S.delete threadId)
 
-    mainLoop c stateVar coordinatorServerName = runWithTermHandler $ do
-        threadId <- myThreadId
-        safelyWithSocket c Rep (Connect "inproc://requests") $
-               \s -> loop s c coordinatorServerName stateVar -- Run loop once (it creates more listeners as it moves)
-        atomically $ modifyTVar threadsRef (S.delete threadId)
+    mainLoop c stateVar coordinatorServerName s = do
+      threadId <- myThreadId
+      runWithTermHandler $ loop s c coordinatorServerName stateVar -- Run loop once (it creates more listeners as it moves)
+      atomically $ modifyTVar threadsRef (S.delete threadId)
 
     expandRowIds regions = concatMap (\(x, y) -> [x..(y - BlockRowID 1)]) regions
 
     loop s c coordinatorName stateVar = do
+      putStrLn "Looping!"
       serveRequest s (return ()) $
          \(cmd :: Command) -> do
-            launchMainLoop c stateVar coordinatorName
             infoM moduleName $ "Got command: " ++ show cmd
             case cmd of
               RunQuery key txt -> doRunQuery c coordinatorName key txt -- this runs in the IO monad, non-atomically
@@ -332,25 +319,25 @@ dataServerMain coordinatorName localAddress = do
     Commands are entered directly using Haskell read syntax. Responses are parsed
     and printed using Show
 -}
-dataServerSimpleClient :: IO ()
-dataServerSimpleClient = do
-  hd <- initializeInput defaultSettings -- Initialize haskeline
-  infoM moduleName "Welcome to DIME data server debug client..."
-  withContext $ \c ->
-      safelyWithSocket c Req (Connect "tcp://127.0.0.1:8008") $
-          \s -> forever $ loop s hd
-    where
-      loop s hd = do
-        line <- queryInput hd (getInputLine "% ")
-        case line of
-          Just lineData -> do
-              result <- E.catch (E.evaluate $ Just $ read lineData) (\(e :: E.SomeException) -> return Nothing)
-              case result of
-                Nothing -> putStrLn $ "Could not parse request"
-                Just (cmd :: Command) -> do
-                             putStrLn $ "Sending command"
-                             startTime <- getClockTime
-                             sendOneRequest s cmd (putStrLn . show :: Response -> IO ())
-                             endTime <- getClockTime
-                             let timeTaken = endTime `diffClockTimes` startTime
-                             putStrLn $ "Query took " ++ (show $ tdMin timeTaken) ++ " m, " ++ (show $ tdSec timeTaken) ++ "s, " ++ (show $ (tdPicosec timeTaken) `div` 1000000000) ++ "ms."
+-- dataServerSimpleClient :: IO ()
+-- dataServerSimpleClient = do
+--   hd <- initializeInput defaultSettings -- Initialize haskeline
+--   infoM moduleName "Welcome to DIME data server debug client..."
+--   withContext $ \c ->
+--      withAttachedSocket c (Connect (ipv4 8008 "127.0.0.1")) $
+--           \s -> forever $ loop s hd
+--     where
+--       loop s hd = do
+--         line <- queryInput hd (getInputLine "% ")
+--         case line of
+--           Just lineData -> do
+--               result <- E.catch (E.evaluate $ Just $ read lineData) (\(e :: E.SomeException) -> return Nothing)
+--               case result of
+--                 Nothing -> putStrLn $ "Could not parse request"
+--                 Just (cmd :: Command) -> do
+--                              putStrLn $ "Sending command"
+--                              startTime <- getClockTime
+--                              sendOneRequest s cmd (putStrLn . show :: Response -> IO ())
+--                              endTime <- getClockTime
+--                              let timeTaken = endTime `diffClockTimes` startTime
+--                              putStrLn $ "Query took " ++ (show $ tdMin timeTaken) ++ " m, " ++ (show $ tdSec timeTaken) ++ "s, " ++ (show $ (tdPicosec timeTaken) `div` 1000000000) ++ "ms."

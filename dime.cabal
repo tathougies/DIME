@@ -41,7 +41,7 @@ executable dime-server
                    old-locale -any, PSQueue -any, resourcet -any, network -any, old-time -any,
                    mtl -any, parsec -any, pretty -any, ConfigFile -any, deepseq -any, unix -any,
                    MissingH -any, semigroups -any, filepath -any, base64-bytestring -any,
-                   ConfigFile -any, zlib -any, parallel -any
+                   ConfigFile -any, zlib -any, parallel -any, random -any
     main-is: Server.hs
     buildable: True
     hs-source-dirs: src

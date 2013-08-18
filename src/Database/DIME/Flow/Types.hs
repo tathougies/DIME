@@ -20,6 +20,8 @@ module Database.DIME.Flow.Types where
     import Language.Flow.Execution.Types
     import Language.Flow.Execution.GMachine
 
+    import qualified Network.Socket as Net
+
     import System.Time
 
     data BlockInfo = BlockInfo [PeerName]
@@ -51,7 +53,7 @@ module Database.DIME.Flow.Types where
 
     data QueryState = QueryState {
                           queryKey :: QueryKey,
-                          queryServerName :: String,
+                          queryServerName :: Net.SockAddr,
                           queryZMQContext :: Context IO
                       }
                 deriving Typeable

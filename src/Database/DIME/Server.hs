@@ -4,7 +4,9 @@ module Database.DIME.Server
      serverMain
     ) where
 
+import Control.Applicative
 import Control.Concurrent
+import Control.Concurrent.STM
 import Control.Monad.Trans
 import Control.Monad
 
@@ -12,6 +14,7 @@ import qualified Data.ByteString.Char8 as BS
 import qualified Data.Text as T
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import qualified Data.Binary as Bin
+import qualified Data.Map as M
 
 import Database.DIME.Server.TimeSeriesApp
 import Database.DIME.Server.Util
@@ -53,7 +56,9 @@ queryApp st [] request = do
 
       formatTime calTime = (formatCalendarTime defaultTimeLocale "%Y-%m-%d %H:%M:%S." calTime) ++ show (ctPicosec calTime `div` 1000000)
 
-  liftIO $ sendRequest (zmqContext st) (Connect "inproc://queries") queryCmd $
+  peers <- liftIO (M.keys . getPeers <$> (atomically . readTVar . peersRef $ st))
+  PeerName peer <- liftIO (pick peers)
+  liftIO $ sendRequest (zmqContext st) (Connect peer) queryCmd $
       \response ->
         case response of
           QueryResponse (DoubleResult d) -> ok [contentTypeJson] $ LBS.pack $ J.encode d
@@ -88,18 +93,10 @@ dumpStatePeriodically state = forever $ do
                                 threadDelay dumpDelay
                                 rebuildTimeSeriesMap state
 
-queryDistributor :: Context IO -> IO () -- receives query requests and forwards them on to some node to handle them
-queryDistributor c = do
-  infoM moduleName $ "Query broker starting..."
-  safelyWithSocket c Router (Bind "inproc://queries") $ \routerS ->
-      safelyWithSocket c Dealer (Bind $ "tcp://*:" ++ show queryBrokerPort) $ \dealerS ->
-          proxy routerS dealerS
-
 serverMain :: IO ()
-serverMain = do
-  serverState <- newServerState "timeSeriesData.json"
+serverMain = withContext $ \ctxt -> do
+  serverState <- newServerState ctxt "timeSeriesData.json"
   forkIO $ webServerMain serverState
-  forkIO $ queryDistributor $ zmqContext serverState
   forkIO $ dumpStatePeriodically serverState
   peerServer serverState
   return ()

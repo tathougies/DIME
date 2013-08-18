@@ -5,6 +5,7 @@ module Database.DIME.Server.Peers
       peerServer
     ) where
 
+import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Monad
 
@@ -60,8 +61,9 @@ peerServer :: State -> IO ()
 peerServer serverState = do
   infoM moduleName "DIME peer server starting"
   withContext $ \c ->
-      safelyWithSocket c Rep (Bind $ "tcp://*:" ++ show coordinatorPort) $
-            (forever . serve serverState)
+      withAttachedSocket c (bindingPort (fromIntegral coordinatorPort)) $ \s -> forever $ do
+        (s', _) <- accept s
+        forkIO . forever . serve serverState $ s'
   where
     serve serverState s =
         serveRequest s (return ()) $
