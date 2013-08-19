@@ -126,6 +126,7 @@ restoreStateFromChunks state@DataServerState{ getChunkDir = chunkDir} = do
                   Error e -> error $ "Couldn't read column " ++ show columnSpec ++ ": " ++ e
               columnsForTable = maybe S.empty id $ M.lookup tableId $ getTables state
               columnsForTable' = S.insert columnId columnsForTable
+          putStrLn ("mapping: " ++ show (((tableId, columnsForTable'), ((tableId, columnId), rowMappings))))
 
           rowMappingsVar <- newMVar rowMappings
           return ((tableId, columnsForTable'), ((tableId, columnId), rowMappingsVar)))
@@ -138,14 +139,17 @@ restoreStateFromChunks state@DataServerState{ getChunkDir = chunkDir} = do
        (\blockSpec -> do
           blockData <- readFile $ blockFileName chunkDir blockSpec
 
-          let blk = case JSON.decode blockData of
-                      Ok (JSObject blockDict) -> parseBlock blockDict
-                      Ok x -> error $ "Couldn't read block " ++ show blockSpec ++ ": bad type"
-                      Error e -> error $ "Couldn't read block " ++ show blockSpec ++ ": " ++ e
+          blk <- case JSON.decode blockData of
+                   Ok (JSObject blockDict) -> return (parseBlock blockDict)
+                   Ok x -> fail ("Couldn't read block " ++ show blockSpec ++ ": bad type")
+                   Error e -> fail ("Couldn't read block " ++ show blockSpec ++ ": " ++ e)
 
           warmBlock <- genericThaw blk
           blockVar <- newMVar warmBlock
           return (blockSpec, blockVar))
+
+  putStrLn ("going to show tables")
+  putStrLn ("tables: " ++ show tableAssocs)
 
   return state {
     getTables = M.fromList tableAssocs,
@@ -475,18 +479,20 @@ modifyGenericBlock rowIndexF dataF (GenericBlock r b) = GenericBlock (rowIndexF 
 
 dumpState :: MVar DataServerState -> IO ()
 dumpState stateVar = do
-  state@(DataServerState { getChunkDir = chunkDir }) <- takeMVar stateVar
-  let modifiedBlocks = S.toList $ getModifiedBlocks state
-      allModifiedColumns = L.sort $ map (\(BlockSpec tableId columnId _) -> (tableId, columnId)) modifiedBlocks
-      modifiedColumns = L.nub allModifiedColumns
-      columnVars = catMaybes (map (flip M.lookup (getRowMappings state)) modifiedColumns)
-      updatedBlocks = map (\blockSpec ->
-                            case M.lookup blockSpec (getBlocks state) of
-                              Nothing -> error $ "Deleted " ++ show blockSpec ++ " not handled"
-                              Just block -> (blockSpec, block)) modifiedBlocks
-      allBlocks = M.keys (getBlocks state)
-  updatedColumns <- withAllMVars columnVars $ \columns -> return (zip modifiedColumns (map DIT.assocs columns))
-  putMVar stateVar $ state {getModifiedBlocks = S.empty} -- empty out modified blocks
+  (chunkDir, allBlocks, updatedBlocks, updatedColumns) <-
+    E.bracket (takeMVar stateVar) (\state -> putMVar stateVar $ state {getModifiedBlocks = S.empty }) $
+      \state -> do
+        let modifiedBlocks = S.toList $ getModifiedBlocks state
+            allModifiedColumns = L.sort $ map (\(BlockSpec tableId columnId _) -> (tableId, columnId)) modifiedBlocks
+            modifiedColumns = L.nub allModifiedColumns
+            columnVars = catMaybes (map (flip M.lookup (getRowMappings state)) modifiedColumns)
+            updatedBlocks = map (\blockSpec ->
+                              case M.lookup blockSpec (getBlocks state) of
+                                Nothing -> error $ "Deleted " ++ show blockSpec ++ " not handled"
+                                Just block -> (blockSpec, block)) modifiedBlocks
+            allBlocks = M.keys (getBlocks state)
+        updatedColumns <- withAllMVars columnVars $ \columns -> return (zip modifiedColumns (map DIT.assocs columns))
+        return (getChunkDir state, allBlocks, updatedBlocks, updatedColumns)
 
   -- the row ranges of modified columns should be written out again
 

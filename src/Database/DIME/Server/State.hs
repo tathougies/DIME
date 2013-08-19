@@ -621,7 +621,7 @@ instance JSON PeerName where
   readJSON (JSObject objData') =
     let objData = fromJSObject objData'
         l fieldName = lookup fieldName objData
-    in case (l "type") of
+    in case (l "t") of
       Nothing -> Error "Missing 'type' field"
       Just typ -> case readJSON typ of
         Error _ -> Error "'type' field has wrong type"

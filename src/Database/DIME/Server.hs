@@ -46,6 +46,13 @@ moduleName = "Database.DIME.Server"
 prefsApp :: HttpPath -> Application
 prefsApp timeSeriesName request = return $ responseLBS status400 [("Content-Type", "text/plain")] ""
 
+queryEndpoint :: PeerName -> SockAddr
+queryEndpoint (PeerName peer) =
+    case peer of
+      SockAddrInet _ host -> SockAddrInet (fromIntegral queryBrokerPort) host
+      SockAddrInet6 _ flow host scope -> SockAddrInet6 (fromIntegral queryBrokerPort) flow host scope
+      SockAddrUnix file -> SockAddrUnix (file ++ "_query")
+
 queryApp :: State -> HttpPath -> Application
 queryApp st [] request = do
   -- Run query!
@@ -57,8 +64,8 @@ queryApp st [] request = do
       formatTime calTime = (formatCalendarTime defaultTimeLocale "%Y-%m-%d %H:%M:%S." calTime) ++ show (ctPicosec calTime `div` 1000000)
 
   peers <- liftIO (M.keys . getPeers <$> (atomically . readTVar . peersRef $ st))
-  PeerName peer <- liftIO (pick peers)
-  liftIO $ sendRequest (zmqContext st) (Connect peer) queryCmd $
+  peer <- liftIO (pick peers)
+  liftIO $ sendRequest (zmqContext st) (Connect (queryEndpoint peer)) queryCmd $
       \response ->
         case response of
           QueryResponse (DoubleResult d) -> ok [contentTypeJson] $ LBS.pack $ J.encode d
@@ -85,6 +92,7 @@ webServerApp state req = let path = normalizedPath $ pathInfo req
 webServerMain :: State -> IO ()
 webServerMain state = do
   infoM moduleName "DIME server starting (debug mode on) ..."
+  infoM moduleName ("Running on " ++ show webPort)
 
   run webPort (webServerApp state)
 

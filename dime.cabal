@@ -34,11 +34,11 @@ data-dir: ""
 
 executable dime-server
     build-depends: QuickCheck -any, base -any, vector -any, data-default -any,
-                   zeromq3-haskell -any, haskeline -any, binary -any, bytestring -any,
+                   binary -any, bytestring -any,
                    hslogger -any, array -any, split -any, containers -any, json -any,
-                   text -any, http-types ==0.7.3.0.1, wai -any, stm -any, warp -any,
+                   text -any, http-types -any, wai -any, stm -any, warp -any,
                    transformers -any, directory -any, conduit -any, wai-extra -any,
-                   old-locale -any, PSQueue -any, resourcet -any, network -any, old-time -any,
+                   old-locale -any, PSQueue -any, resourcet -any, network >=2.4.1.2, old-time -any,
                    mtl -any, parsec -any, pretty -any, ConfigFile -any, deepseq -any, unix -any,
                    MissingH -any, semigroups -any, filepath -any, base64-bytestring -any,
                    ConfigFile -any, zlib -any, parallel -any, random -any

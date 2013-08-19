@@ -44,10 +44,7 @@ import Language.Flow.Execution.GMachine
 
 import qualified Network.Socket as Net
 
-import qualified System.ZMQ3 as ZMQ
 import System.Log.Logger
-import System.Console.Haskeline hiding (throwTo)
-import System.Console.Haskeline.IO
 import System.IO
 import System.Time
 import System.IO.Unsafe
@@ -108,7 +105,7 @@ dataServerMain coordinatorName localAddress = do
       infoM moduleName "Waiting for request broker..."
 
       forkIO (requestHandler c stateVar coordinatorServerName)
-      forkIO (queryHandler c stateVar coordinatorServerName)
+      forkIO (queryHandler c coordinatorServerName)
 
       untilTerm $ saveDataPeriodically stateVar
       infoM moduleName "Going to dump data..."
@@ -135,7 +132,7 @@ dataServerMain coordinatorName localAddress = do
         forever $ do
           (s', _) <- accept s
           launchMainLoop c stateVar coordinatorServerName s'
-    queryHandler c stateVar coordinatorServerName =
+    queryHandler c coordinatorServerName =
       withAttachedSocket c (bindingPort (fromIntegral queryBrokerPort)) $ \s -> forever $ do
         (s', _) <- accept s
         launchQueryLoop c coordinatorServerName s'
@@ -145,37 +142,38 @@ dataServerMain coordinatorName localAddress = do
       ServerState.dumpState stateVar
 
     launchMainLoop c stateVar coordinatorServerName s = do
-      loopId <- forkIO $ mainLoop c stateVar coordinatorServerName s
+      loopId <- forkIO (do
+                         mainLoop c stateVar coordinatorServerName s
+                         finish s)
       atomically $ modifyTVar threadsRef (S.insert loopId)
 
     launchQueryLoop c coordinatorServerName s = do
-      loopId <- forkIO $ queryLoop c coordinatorServerName s
+      loopId <- forkIO (do
+                         queryLoop c coordinatorServerName s
+                         finish s)
       atomically $ modifyTVar threadsRef (S.insert loopId)
 
-    queryLoop c coordinatorName s = do
-      threadId <- myThreadId
-      runWithTermHandler $
-       serveRequest s (return ()) $
-       \(cmd :: Command) -> do
-         case cmd of
-           RunQuery key txt -> doRunQuery c coordinatorName key txt
-           _ -> return undefined
-      atomically $ modifyTVar threadsRef (S.delete threadId)
+    queryLoop c coordinatorName s =
+      E.bracket myThreadId (atomically . (modifyTVar threadsRef) . S.delete) (\_ -> do
+        serveRequests s $
+          \(cmd :: Command) -> do
+            case cmd of
+              RunQuery key txt -> doRunQuery c coordinatorName key txt
+              _ -> return undefined)
 
-    mainLoop c stateVar coordinatorServerName s = do
-      threadId <- myThreadId
-      runWithTermHandler $ loop s c coordinatorServerName stateVar -- Run loop once (it creates more listeners as it moves)
-      atomically $ modifyTVar threadsRef (S.delete threadId)
+    mainLoop c stateVar coordinatorServerName s =
+      E.bracket myThreadId (atomically . modifyTVar threadsRef . S.delete) (\_ ->
+        loop s c coordinatorServerName stateVar) -- Run loop once (it creates more listeners as it moves)
 
     expandRowIds regions = concatMap (\(x, y) -> [x..(y - BlockRowID 1)]) regions
 
     loop s c coordinatorName stateVar = do
       putStrLn "Looping!"
-      serveRequest s (return ()) $
+      serveRequests s $
          \(cmd :: Command) -> do
             infoM moduleName $ "Got command: " ++ show cmd
             case cmd of
-              RunQuery key txt -> doRunQuery c coordinatorName key txt -- this runs in the IO monad, non-atomically
+             -- RunQuery key txt -> doRunQuery c coordinatorName key txt -- this runs in the IO monad, non-atomically
               _ -> modifyMVar stateVar $ \state ->do
                 (response, !newState) <- case cmd of -- Parse the command
                   FetchRows tableId rowIds columnIds ->
@@ -223,6 +221,7 @@ dataServerMain coordinatorName localAddress = do
                             Right (_, tsData) <- let retValD = asTimeSeries retVal
                                                  in runGMachine (forceTimeSeries retValD >>
                                                                  readTimeSeries retValD) state
+                            putStrLn "Returning time series!"
                             return $ QueryResponse $ TimeSeriesResult tsData
                  | otherwise -> return $ Fail "Invalid type returned from query")
             (\(e :: SomeException) -> do

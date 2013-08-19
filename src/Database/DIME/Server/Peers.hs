@@ -63,10 +63,12 @@ peerServer serverState = do
   withContext $ \c ->
       withAttachedSocket c (bindingPort (fromIntegral coordinatorPort)) $ \s -> forever $ do
         (s', _) <- accept s
-        forkIO . forever . serve serverState $ s'
+        forkIO (do
+                 serve serverState s'
+                 finish s')
   where
     serve serverState s =
-        serveRequest s (return ()) $
+        serveRequests s $
             \cmd -> case cmd of
                       UpdateInfo peerName blockCount -> doUpdateInfo peerName blockCount serverState
                       TimeSeriesInfo _ tsName -> doTimeSeriesInfo tsName serverState -- query key ignored for now

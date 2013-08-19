@@ -1,3 +1,4 @@
+{-# LANGUAGE DoAndIfThenElse #-}
 module Database.DIME.DataServer.Response
     (Response(..),
      QueryResult(..),
@@ -13,6 +14,7 @@ import qualified Data.Text as T
 import Data.Binary
 import Data.Int
 
+import Control.Applicative
 import Control.Monad
 
 import System.Time
@@ -66,7 +68,10 @@ instance Binary Response where
     put InconsistentArguments = put inconsistentArgumentsTag
     put (FetchRowsResponse values) = do
                            put fetchRowsResponseTag
-                           put values
+                           put (fromIntegral . length $ values :: Word32)
+                           when (length values > 0) $ do
+                             put (fromIntegral . length . head $ values :: Word32)
+                             mapM_ (mapM_ put) values
     put (Fail error) = do
       put failTag
       put error
@@ -86,7 +91,13 @@ instance Binary Response where
         10 {- inconsistentArgumentsTag -} -> return InconsistentArguments
       where
         doBlockInfoResponse = liftM BlockInfoResponse get
-        doFetchRowsResponse = liftM FetchRowsResponse get
+        doFetchRowsResponse = do
+            rowCount <- (get :: Get Word32)
+            if rowCount > 0
+            then do
+              colCount <- (get :: Get Word32)
+              FetchRowsResponse <$> replicateM (fromIntegral rowCount) (replicateM (fromIntegral colCount) get)
+            else return (FetchRowsResponse [])
         doFailResponse = liftM Fail get
         doFetchQueryResponse = liftM QueryResponse get
         doMapResponse = liftM MapResponse get

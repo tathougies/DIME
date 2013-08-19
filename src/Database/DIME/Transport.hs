@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables, TypeFamilies #-}
+{-# LANGUAGE ScopedTypeVariables, TypeFamilies, DeriveDataTypeable, DoAndIfThenElse #-}
 module Database.DIME.Transport
     (EndPoint(..),
 
@@ -6,25 +6,28 @@ module Database.DIME.Transport
      -- safeConnect, safeBind, safeSend, safeAttach,
 
      MonadTransport(..),
+     Net.SockAddr(..),
 
      attach,
 
      withAttachedSocket,
      sendRequest, sendOneRequest, serveRequest,
+     serveRequests,
 
      ipv4, bindingPort
     ) where
 
 import qualified Control.Exception as E
-import Control.Monad (forever)
+import Control.Monad (forever, when, forM_)
 import Control.Monad.Trans
 import Control.Applicative
 
 import qualified Data.ByteString as Strict
 import qualified Data.List.NonEmpty as NonEmpty
-import Data.ByteString.Lazy
+import Data.ByteString.Lazy as Lazy
 import Data.Binary
 import Data.Maybe
+import Data.Typeable
 
 import Foreign.C.Error
 
@@ -52,6 +55,11 @@ ipv4 portNo addr = unsafePerformIO $ do
 intrErrNo = let Errno e = eINTR
             in fromIntegral e
 
+data TransportDisconnected = TransportDisconnected
+  deriving (Show, Read, Typeable)
+
+instance E.Exception TransportDisconnected
+
 class (Monad m, MonadIO m) => MonadTransport m where
     data Context m
     data Socket m
@@ -61,14 +69,17 @@ class (Monad m, MonadIO m) => MonadTransport m where
 
     connect :: Socket m -> Net.SockAddr -> m ()
     bind :: Socket m -> Net.SockAddr -> m ()
+    finish :: Socket m -> m ()
 
     send :: Socket m -> Strict.ByteString -> m ()
     send' :: Socket m -> ByteString -> m ()
 
-    receive :: Socket m -> m Strict.ByteString
+    receive :: Socket m -> m (Maybe Strict.ByteString)
     accept :: Socket m -> m (Socket m, Net.SockAddr)
 
     withSocket :: Context m -> (Socket m -> m b) -> m b
+
+chunkSize = 65536
 
 instance MonadTransport IO where
   data Context IO = Context
@@ -78,20 +89,24 @@ instance MonadTransport IO where
 
   connect (SocketIO s) addr = safeIO $ Net.connect s addr
   bind (SocketIO s) addr = do
+    Net.setSocketOption s Net.ReuseAddr 1
     safeIO $ Net.bindSocket s addr
     safeIO $ Net.listen s 5
-  send (SocketIO s) dat = do
-    let datLength = Strict.length dat
-        lengthEncoded = encode (fromIntegral datLength :: Word16)
+  finish (SocketIO s) = Net.close s
+  send s dat = send' s (Lazy.fromChunks [dat])
+  send' (SocketIO s) datLazy = do
+    let datLength = Lazy.length datLazy
+        lengthEncoded = encode (fromIntegral datLength :: Word32)
     safeIO $ NetBS.send s (Strict.concat . toChunks $ lengthEncoded)
-    safeIO $ NetBS.send s dat
-    return ()
-  send' s datLazy = send s (Strict.concat . toChunks $ datLazy)
+    doSend s (toChunks datLazy)
   receive (SocketIO s) = do
-    lengthData <- safeIO $ NetBS.recv s 2
-    let length = decode (fromChunks [lengthData]) :: Word16
-    dat <- safeIO $ NetBS.recv s (fromIntegral length)
-    return dat
+    lengthData <- safeIO $ NetBS.recv s 4
+    if Strict.length lengthData == 0
+    then return Nothing
+    else do
+      let length = decode (fromChunks [lengthData]) :: Word32
+      dat <- doRecv s (fromIntegral length) Strict.empty
+      return (Just dat)
   accept (SocketIO s) = do
     (s', a) <- Net.accept s
     return (SocketIO s', a)
@@ -99,6 +114,21 @@ instance MonadTransport IO where
     E.bracket (SocketIO <$> Net.socket Net.AF_INET Net.Stream Net.defaultProtocol)
               (\(SocketIO s) -> safeIO $ Net.close s)
               action
+
+doRecv :: Net.Socket -> Int -> Strict.ByteString -> IO Strict.ByteString
+doRecv s left a = do
+  dat <- safeIO $ NetBS.recv s (min left chunkSize)
+  if Strict.length dat < left
+    then doRecv s (left - Strict.length dat) (Strict.append a dat)
+    else return (Strict.append a dat)
+
+doSend :: Net.Socket -> [Strict.ByteString] -> IO ()
+doSend s [] = return ()
+doSend s (x:xs) = do
+  bytesSent <- safeIO $ NetBS.send s x
+  if bytesSent == Strict.length x
+  then doSend s xs
+  else doSend s (Strict.drop bytesSent x:xs)
 
 safeIO :: IO a -> IO a
 safeIO ioAction =
@@ -130,10 +160,24 @@ attach s (Bind interface) = bind s interface
 serveRequest :: (Binary requestType, Binary responseType, MonadTransport m) => Socket m -> m () -> (requestType -> m responseType) -> m ()
 serveRequest s afterResp reqHandler = do
   line <- receive s
-  let cmd = decode $ fromChunks [line]
-  response <- reqHandler cmd
-  send' s (encode response)
-  afterResp
+  case line of
+    Nothing -> return ()
+    Just line -> do
+      let cmd = decode $ fromChunks [line]
+      response <- reqHandler cmd
+      send' s (encode response)
+      afterResp
+
+serveRequests :: (Binary requestType, Binary responseType, MonadTransport m) => Socket m -> (requestType -> m responseType) -> m ()
+serveRequests s reqHandler = do
+  line <- receive s
+  case line of
+    Just line -> do
+      let cmd = decode $ fromChunks [line]
+      response <- reqHandler cmd
+      send' s (encode response)
+      serveRequests s reqHandler
+    Nothing -> return ()
 
 -- safelyWithSocket :: (ZMQ.SocketType a, MonadTransport m) => Context m -> a -> EndPoint -> (Socket m a -> m b) -> m b
 -- safelyWithSocket c socketType endPoint handler =
@@ -210,8 +254,11 @@ sendOneRequest s request responseHandler = do
     let cmdData = encode $ request
     send' s cmdData
     reply <- receive s
-    let response = decode $ fromChunks [reply]
-    responseHandler response
+    case reply of
+      Just reply -> do
+        let response = decode $ fromChunks [reply]
+        responseHandler response
+      Nothing -> fail "Remote hung up without sending response"
 
 -- serveRequest :: (Binary requestType, Binary responseType, ZMQ.Sender s, ZMQ.Receiver s) => ZMQ.Socket s -> IO () -> (requestType -> IO responseType) -> IO ()
 -- serveRequest s afterResp reqHandler = do
